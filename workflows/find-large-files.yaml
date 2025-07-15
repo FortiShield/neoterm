@@ -15,3 +15,6 @@ arguments:
     default_value: "100M"
     arg_type: string
     required: true
+steps:
+  - name: Find files larger than 100MB
+    command: find . -type f -size +100M -print0 | xargs -0 du -h | sort -rh

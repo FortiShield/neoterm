@@ -40,7 +40,7 @@ mod workflows;
 mod lpc;
 mod mcq;
 mod markdown_parser;
-mod api;
+mod api; // New API module
 
 use block::{Block, BlockContent}; // Updated import
 use shell::ShellManager;

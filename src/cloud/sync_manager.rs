@@ -4,6 +4,10 @@ use tokio::sync::RwLock;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use uuid::Uuid;
+use sha2::{Sha256, Digest};
+
+// This module would handle cloud synchronization for settings, history, etc.
+// For now, it's a placeholder.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncableData {
@@ -216,7 +220,6 @@ impl CloudSyncManager {
     }
 
     fn calculate_checksum(&self, content: &serde_json::Value) -> String {
-        use sha2::{Sha256, Digest};
         let content_str = serde_json::to_string(content).unwrap_or_default();
         let mut hasher = Sha256::new();
         hasher.update(content_str.as_bytes());

@@ -13,6 +13,8 @@ pub struct UserPreferences {
     pub theme: String,
     pub font_size: u16,
     pub shell: String,
+    pub enable_ai_suggestions: bool,
+    pub enable_telemetry: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,8 +232,10 @@ impl Default for UserPreferences {
             privacy: PrivacyPreferences::default(),
             environment_profiles: EnvironmentProfiles::default(),
             theme: "default".to_string(),
-            font_size: 12,
+            font_size: 14,
             shell: "bash".to_string(),
+            enable_ai_suggestions: true,
+            enable_telemetry: false,
         }
     }
 }

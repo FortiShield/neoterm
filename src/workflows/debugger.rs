@@ -4,6 +4,9 @@ use tokio::sync::mpsc;
 use chrono::{DateTime, Utc};
 use crate::workflows::{Workflow, WorkflowStep, WorkflowExecutor};
 
+// This module would provide tools for debugging workflows.
+// For now, it's a placeholder.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugSession {
     pub id: String,

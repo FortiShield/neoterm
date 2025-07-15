@@ -22,9 +22,9 @@ pub struct Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageRole {
-    System,
     User,
     Assistant,
+    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

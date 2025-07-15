@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use crate::config::{AppConfig, ThemeConfig, ConfigError};
 use super::yaml_theme::{YamlTheme, YamlThemeError};
+use serde_yaml;
+use notify;
+use tempfile;
 
 pub struct YamlThemeManager {
     themes_dir: PathBuf,
-    loaded_themes: HashMap<String, YamlTheme>,
-    theme_cache: HashMap<String, ThemeConfig>,
+    themes: HashMap<String, YamlTheme>,
 }
 
 impl YamlThemeManager {
@@ -24,90 +26,49 @@ impl YamlThemeManager {
 
         let mut manager = Self {
             themes_dir,
-            loaded_themes: HashMap::new(),
-            theme_cache: HashMap::new(),
+            themes: HashMap::new(),
         };
 
-        manager.scan_themes()?;
+        manager.load_themes();
         Ok(manager)
     }
 
-    /// Scan themes directory and load all YAML themes
-    pub fn scan_themes(&mut self) -> Result<(), ConfigError> {
-        self.loaded_themes.clear();
-        self.theme_cache.clear();
-
-        if !self.themes_dir.exists() {
-            return Ok(());
-        }
-
-        for entry in std::fs::read_dir(&self.themes_dir)
-            .map_err(|e| ConfigError::IoError(e.to_string()))?
-        {
-            let entry = entry.map_err(|e| ConfigError::IoError(e.to_string()))?;
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("yaml") ||
-               path.extension().and_then(|s| s.to_str()) == Some("yml") {
-                
-                match self.load_theme_file(&path) {
-                    Ok((name, theme)) => {
-                        self.loaded_themes.insert(name, theme);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to load theme {:?}: {}", path, e);
+    fn load_themes(&mut self) {
+        if self.themes_dir.is_dir() {
+            for entry in std::fs::read_dir(&self.themes_dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml") {
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            match serde_yaml::from_str::<YamlTheme>(&content) {
+                                Ok(theme) => {
+                                    self.themes.insert(theme.name.clone(), theme);
+                                },
+                                Err(e) => eprintln!("Error parsing theme file {}: {}", path.display(), e),
+                            }
+                        },
+                        Err(e) => eprintln!("Error reading theme file {}: {}", path.display(), e),
                     }
                 }
             }
         }
-
-        Ok(())
-    }
-
-    /// Load a single theme file
-    fn load_theme_file(&self, path: &Path) -> Result<(String, YamlTheme), YamlThemeError> {
-        let theme = YamlTheme::from_file(path)?;
-        theme.validate()?;
-        
-        let name = theme.name.clone()
-            .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| "Unnamed Theme".to_string());
-
-        Ok((name, theme))
     }
 
     /// Get all available YAML theme names
     pub fn get_theme_names(&self) -> Vec<String> {
-        self.loaded_themes.keys().cloned().collect()
+        self.themes.keys().cloned().collect()
     }
 
     /// Get a theme by name
-    pub fn get_theme(&mut self, name: &str) -> Option<ThemeConfig> {
-        if let Some(cached) = self.theme_cache.get(name) {
-            return Some(cached.clone());
-        }
-
-        if let Some(yaml_theme) = self.loaded_themes.get(name) {
-            match yaml_theme.to_theme_config() {
-                Ok(theme_config) => {
-                    self.theme_cache.insert(name.to_string(), theme_config.clone());
-                    Some(theme_config)
-                }
-                Err(e) => {
-                    eprintln!("Failed to convert YAML theme '{}': {}", name, e);
-                    None
-                }
-            }
-        } else {
-            None
-        }
+    pub fn get_theme(&self, name: &str) -> Option<&YamlTheme> {
+        self.themes.get(name)
     }
 
     /// Import theme from YAML string
     pub fn import_theme_from_string(&mut self, yaml_content: &str, name: Option<String>) -> Result<String, YamlThemeError> {
-        let mut theme = YamlTheme::from_yaml(yaml_content)?;
-        theme.validate()?;
-
+        let mut theme: YamlTheme = serde_yaml::from_str(yaml_content)?;
+        
         let theme_name = name.or_else(|| theme.name.clone())
             .unwrap_or_else(|| format!("imported_theme_{}", chrono::Utc::now().timestamp()));
 
@@ -115,11 +76,10 @@ impl YamlThemeManager {
 
         // Save to file
         let file_path = self.themes_dir.join(format!("{}.yaml", sanitize_filename(&theme_name)));
-        theme.to_file(&file_path)?;
+        std::fs::write(&file_path, yaml_content)?;
 
         // Add to loaded themes
-        self.loaded_themes.insert(theme_name.clone(), theme);
-        self.theme_cache.remove(&theme_name); // Clear cache
+        self.themes.insert(theme_name.clone(), theme);
 
         Ok(theme_name)
     }
@@ -152,8 +112,7 @@ impl YamlThemeManager {
         yaml_theme.to_file(&file_path)?;
         
         // Add to loaded themes
-        self.loaded_themes.insert(theme_config.name.clone(), yaml_theme);
-        self.theme_cache.insert(theme_config.name.clone(), theme_config.clone());
+        self.themes.insert(theme_config.name.clone(), yaml_theme);
 
         Ok(())
     }
@@ -167,15 +126,14 @@ impl YamlThemeManager {
                 .map_err(|e| YamlThemeError::IoError(e.to_string()))?;
         }
 
-        self.loaded_themes.remove(name);
-        self.theme_cache.remove(name);
+        self.themes.remove(name);
 
         Ok(())
     }
 
     /// Get theme metadata
     pub fn get_theme_metadata(&self, name: &str) -> Option<ThemeMetadata> {
-        self.loaded_themes.get(name).map(|theme| ThemeMetadata {
+        self.themes.get(name).map(|theme| ThemeMetadata {
             name: theme.name.clone().unwrap_or_else(|| name.to_string()),
             author: theme.author.clone(),
             description: theme.description.clone(),
@@ -187,7 +145,7 @@ impl YamlThemeManager {
 
     /// Get all theme metadata
     pub fn get_all_metadata(&self) -> Vec<ThemeMetadata> {
-        self.loaded_themes
+        self.themes
             .keys()
             .filter_map(|name| self.get_theme_metadata(name))
             .collect()

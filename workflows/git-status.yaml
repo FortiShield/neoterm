@@ -1,12 +1,5 @@
-name: "Git Status with Branch Info"
-description: "Show git status with current branch and upstream information"
-command: "git status -b && echo '\n--- Recent Commits ---' && git log --oneline -{{limit}}"
-tags: ["git", "status", "branch"]
-author: "NeoTerm"
-shells: ["bash", "zsh", "fish"]
-arguments:
-  - name: limit
-    description: "Number of recent commits to show"
-    default_value: "5"
-    arg_type: number
-    required: false
+name: Git Status
+description: Shows the current git status.
+steps:
+  - name: Git status
+    command: git status

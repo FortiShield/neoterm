@@ -238,7 +238,7 @@ impl ColorScheme {
             hover: ColorValue { r: 0.0, g: 0.0, b: 0.0, a: 0.05 },
             active: ColorValue { r: 0.0, g: 0.0, b: 0.0, a: 0.1 },
             focus: ColorValue { r: 0.0, g: 0.4, b: 0.8, a: 0.3 },
-            disabled: ColorValue { r: 0.5, g: 0.5, b: 0.5, a: 0.5 },
+            disabled: ColorValue { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
             
             border: ColorValue { r: 0.8, g: 0.8, b: 0.8, a: 1.0 },
             divider: ColorValue { r: 0.85, g: 0.85, b: 0.85, a: 1.0 },
@@ -345,6 +345,32 @@ impl Default for Effects {
             cursor_blink: true,
             cursor_blink_rate: 500,
             text_smoothing: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Theme {
+    pub background: Color,
+    pub foreground: Color,
+    pub primary: Color,
+    pub secondary: Color,
+    pub danger: Color,
+    pub text: Color,
+    pub border: Color,
+    // Add more theme colors/styles as needed
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            background: Color::from_rgb8(240, 240, 240),
+            foreground: Color::BLACK,
+            primary: Color::from_rgb8(0, 120, 215),
+            secondary: Color::from_rgb8(100, 100, 100),
+            danger: Color::from_rgb8(200, 0, 0),
+            text: Color::BLACK,
+            border: Color::from_rgb8(200, 200, 200),
         }
     }
 }

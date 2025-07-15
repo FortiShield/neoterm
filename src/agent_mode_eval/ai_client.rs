@@ -3,6 +3,15 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use futures_util::StreamExt; // For consuming reqwest response stream
+use async_trait::async_trait;
+use tokio_stream::{Stream, StreamExt};
+use openai_api::{
+    chat::{ChatCompletion, ChatCompletionChunk, ChatCompletionRequest, Message as OpenAIMessage, Role},
+    Client,
+};
+use std::error::Error;
+use std::fmt;
+use crate::agent_mode_eval::conversation::{Message, MessageRole};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AiProvider {
@@ -11,6 +20,41 @@ pub enum AiProvider {
     Gemini,
     Ollama,
     Groq,
+}
+
+#[derive(Debug, Clone)]
+pub enum AIClientConfig {
+    OpenAI { api_key: Option<String> },
+    // Add other AI providers here (e.g., Google, Anthropic)
+}
+
+#[derive(Debug)]
+pub enum AIClientError {
+    ConfigurationError(String),
+    APIError(String),
+    StreamError(String),
+    SerializationError(String),
+    UnknownError(String),
+}
+
+impl fmt::Display for AIClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AIClientError::ConfigurationError(msg) => write!(f, "Configuration Error: {}", msg),
+            AIClientError::APIError(msg) => write!(f, "API Error: {}", msg),
+            AIClientError::StreamError(msg) => write!(f, "Stream Error: {}", msg),
+            AIClientError::SerializationError(msg) => write!(f, "Serialization Error: {}", msg),
+            AIClientError::UnknownError(msg) => write!(f, "Unknown Error: {}", msg),
+        }
+    }
+}
+
+impl Error for AIClientError {}
+
+#[async_trait]
+pub trait AIClient: Send + Sync {
+    fn clone_box(&self) -> Box<dyn AIClient + Send + Sync>;
+    async fn stream_text(&self, messages: Vec<Message>) -> Result<Box<dyn Stream<Item = Result<String, AIClientError>> + Send + Unpin>, AIClientError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +634,63 @@ impl AiClient {
 
     pub fn get_config(&self) -> &AiConfig {
         &self.config
+    }
+}
+
+#[derive(Clone)]
+pub struct OpenAIClient {
+    client: Client,
+}
+
+impl OpenAIClient {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: Client::new(api_key),
+        }
+    }
+}
+
+#[async_trait]
+impl AIClient for OpenAIClient {
+    fn clone_box(&self) -> Box<dyn AIClient + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    async fn stream_text(&self, messages: Vec<Message>) -> Result<Box<dyn Stream<Item = Result<String, AIClientError>> + Send + Unpin>, AIClientError> {
+        let openai_messages: Vec<OpenAIMessage> = messages
+            .into_iter()
+            .map(|msg| OpenAIMessage {
+                role: match msg.role {
+                    MessageRole::User => Role::User,
+                    MessageRole::Assistant => Role::Assistant,
+                    MessageRole::System => Role::System,
+                },
+                content: msg.content,
+                name: None, // Not used for now
+            })
+            .collect();
+
+        let request = ChatCompletionRequest::new(
+            "gpt-4o".to_string(), // Use gpt-4o as default
+            openai_messages,
+        )
+        .stream(true);
+
+        let response = self.client.chat_completion_create(request).await
+            .map_err(|e| AIClientError::APIError(format!("Failed to create chat completion: {}", e)))?;
+
+        let stream = response
+            .map(|chunk_result| {
+                chunk_result
+                    .map_err(|e| AIClientError::StreamError(format!("Error receiving chunk: {}", e)))
+                    .and_then(|chunk: ChatCompletionChunk| {
+                        chunk.choices.into_iter().next().map(|choice| {
+                            choice.delta.content.unwrap_or_default()
+                        }).ok_or(AIClientError::StreamError("No content in chunk".to_string()))
+                    })
+            });
+
+        Ok(Box::new(stream))
     }
 }
 

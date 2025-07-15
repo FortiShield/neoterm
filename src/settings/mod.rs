@@ -4,9 +4,11 @@ use std::collections::HashMap;
 
 pub mod theme_editor;
 pub mod keybinding_editor;
+pub mod yaml_theme_ui;
 
 use theme_editor::ThemeEditor;
 use keybinding_editor::KeyBindingEditor;
+use yaml_theme_ui::YamlThemeEditor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsTab {
@@ -35,6 +37,7 @@ pub enum SettingsMessage {
     Cancel,
     ThemeEditor(theme_editor::Message),
     KeyBindingEditor(keybinding_editor::Message),
+    YamlThemeEditor(yaml_theme_ui::Message),
 
     // Environment Profile Management
     SelectEnvironmentProfile(String), // For setting active profile
@@ -106,6 +109,7 @@ pub struct SettingsView {
     pub config: AppConfig,
     pub theme_editor: ThemeEditor,
     pub keybinding_editor: KeyBindingEditor,
+    pub yaml_theme_editor: YamlThemeEditor,
     pub unsaved_changes: bool,
     
     // Environment Profile Editor State
@@ -120,6 +124,7 @@ impl SettingsView {
             active_tab: SettingsTab::General,
             theme_editor: ThemeEditor::new(config.theme.clone()),
             keybinding_editor: KeyBindingEditor::new(config.keybindings.clone()),
+            yaml_theme_editor: YamlThemeEditor::new(),
             config,
             unsaved_changes: false,
             editing_env_profile: None,
@@ -128,7 +133,7 @@ impl SettingsView {
         }
     }
 
-    pub fn update(&mut self, message: SettingsMessage) { // Changed return type to ()
+    pub fn update(&mut self, message: SettingsMessage) {
         match message {
             SettingsMessage::TabChanged(tab) => {
                 self.active_tab = tab;
@@ -182,6 +187,10 @@ impl SettingsView {
                     self.config.keybindings = keybindings;
                     self.unsaved_changes = true;
                 }
+            }
+            SettingsMessage::YamlThemeEditor(msg) => {
+                self.yaml_theme_editor.update(msg);
+                // Potentially update config based on YAML theme changes
             }
             // Environment Profile Messages
             SettingsMessage::SelectEnvironmentProfile(name) => {
@@ -298,56 +307,21 @@ impl SettingsView {
         }
     }
 
-    pub fn view(&self) -> Element<SettingsMessage> {
-        let tabs = self.create_tabs();
-        let content = self.create_content();
-        let actions = self.create_actions();
+    pub fn view(&mut self) -> Element<SettingsMessage> {
+        let tabs = row![
+            button(text("General")).on_press(SettingsMessage::TabChanged(SettingsTab::General)),
+            button(text("Appearance")).on_press(SettingsMessage::TabChanged(SettingsTab::Appearance)),
+            button(text("Terminal")).on_press(SettingsMessage::TabChanged(SettingsTab::Terminal)),
+            button(text("Editor")).on_press(SettingsMessage::TabChanged(SettingsTab::Editor)),
+            button(text("Key Bindings")).on_press(SettingsMessage::TabChanged(SettingsTab::KeyBindings)),
+            button(text("Performance")).on_press(SettingsMessage::TabChanged(SettingsTab::Performance)),
+            button(text("Privacy")).on_press(SettingsMessage::TabChanged(SettingsTab::Privacy)),
+            button(text("Plugins")).on_press(SettingsMessage::TabChanged(SettingsTab::Plugins)),
+            button(text("Environment Profiles")).on_press(SettingsMessage::TabChanged(SettingsTab::EnvironmentProfiles)),
+        ]
+        .spacing(10);
 
-        container(
-            column![
-                tabs,
-                scrollable(content).height(iced::Length::Fill),
-                actions
-            ]
-            .spacing(16)
-        )
-        .padding(24)
-        .into()
-    }
-
-    fn create_tabs(&self) -> Element<SettingsMessage> {
-        let tabs = vec![
-            ("General", SettingsTab::General),
-            ("Appearance", SettingsTab::Appearance),
-            ("Terminal", SettingsTab::Terminal),
-            ("Editor", SettingsTab::Editor),
-            ("Key Bindings", SettingsTab::KeyBindings),
-            ("Performance", SettingsTab::Performance),
-            ("Privacy", SettingsTab::Privacy),
-            ("Plugins", SettingsTab::Plugins),
-            ("Environment Profiles", SettingsTab::EnvironmentProfiles), // New tab
-        ];
-
-        row(
-            tabs.into_iter()
-                .map(|(label, tab)| {
-                    button(text(label))
-                        .on_press(SettingsMessage::TabChanged(tab.clone()))
-                        .style(if self.active_tab == tab {
-                            button::primary
-                        } else {
-                            button::secondary
-                        })
-                        .into()
-                })
-                .collect::<Vec<_>>()
-        )
-        .spacing(8)
-        .into()
-    }
-
-    fn create_content(&self) -> Element<SettingsMessage> {
-        match self.active_tab {
+        let content = match self.active_tab {
             SettingsTab::General => self.create_general_settings(),
             SettingsTab::Appearance => self.create_appearance_settings(),
             SettingsTab::Terminal => self.create_terminal_settings(),
@@ -356,8 +330,18 @@ impl SettingsView {
             SettingsTab::Performance => self.create_performance_settings(),
             SettingsTab::Privacy => self.create_privacy_settings(),
             SettingsTab::Plugins => self.create_plugin_settings(),
-            SettingsTab::EnvironmentProfiles => self.create_environment_profiles_settings(), // New content
-        }
+            SettingsTab::EnvironmentProfiles => self.create_environment_profiles_settings(),
+        };
+
+        column![
+            text("Settings").size(30),
+            tabs,
+            content,
+            button(text("Save")).on_press(SettingsMessage::Save)
+        ]
+        .spacing(20)
+        .padding(20)
+        .into()
     }
 
     fn create_general_settings(&self) -> Element<SettingsMessage> {
@@ -757,29 +741,5 @@ impl SettingsView {
         }
 
         content.into()
-    }
-
-    fn create_actions(&self) -> Element<SettingsMessage> {
-        row![
-            button("Reset to Defaults")
-                .on_press(SettingsMessage::ResetToDefaults),
-            button("Import Config")
-                .on_press(SettingsMessage::ImportConfig),
-            button("Export Config")
-                .on_press(SettingsMessage::ExportConfig),
-            // Spacer
-            iced::widget::horizontal_space(iced::Length::Fill),
-            button("Cancel")
-                .on_press(SettingsMessage::Cancel),
-            button("Save")
-                .on_press(SettingsMessage::Save)
-                .style(if self.unsaved_changes {
-                    button::primary
-                } else {
-                    button::secondary
-                }),
-        ]
-        .spacing(8)
-        .into()
     }
 }

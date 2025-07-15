@@ -1,5 +1,8 @@
 // This file is kept for historical reference of the Ratatui implementation
 // and is no longer actively used by the main application.
+// This module is specifically for Ratatui (TUI) blocks, not the Iced GUI blocks.
+// It was part of the previous Ratatui-focused implementation.
+// For now, it's a placeholder to avoid breaking existing references if any.
 
 use ratatui::{
     backend::Backend,

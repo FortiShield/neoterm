@@ -81,8 +81,10 @@ impl KeyBindingEditor {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&mut self) -> Element<Message> {
         column![
+            text("Keybinding Editor").size(20),
+            text("Customize your keybindings here."),
             // Search and add new binding
             row![
                 text_input("Search bindings...", &self.search_query)

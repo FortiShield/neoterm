@@ -9,8 +9,8 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use std::collections::VecDeque;
-use crate::agent_mode_eval::{AIClient, Conversation, Message, MessageRole};
-use iced::{Element, widget::{column, text, container}};
+use crate::agent_mode_eval::{AIClient, Conversation, Message as AIChatMessage, MessageRole};
+use iced::{Element, widget::{column, text, button, container}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -20,17 +20,35 @@ pub struct ChatMessage {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone)]
+pub enum Message {
+    Toggle,
+    AddUserMessage(String),
+    AddAssistantMessage(String),
+    AddSystemMessage(String),
+    SendChatMessage,
+    ProcessAIResponse,
+    AddChar(char),
+    RemoveChar,
+    ScrollUp,
+    ScrollDown,
+    ScrollToBottom,
+    ClearChat,
+    InjectTerminalContext(String),
+    Resize(u16),
+}
+
 pub struct AISidebar {
-    pub is_open: bool,
-    pub width_percentage: u16,
-    pub messages: VecDeque<ChatMessage>,
-    pub input_buffer: String,
-    pub is_loading: bool,
-    pub scroll_offset: usize,
-    pub ai_client: Option<AIClient>,
-    pub conversation: Option<Conversation>,
-    pub response_receiver: Option<mpsc::UnboundedReceiver<String>>,
-    pub current_response: String,
+    is_open: bool,
+    width_percentage: u16,
+    messages: VecDeque<ChatMessage>,
+    input_buffer: String,
+    is_loading: bool,
+    scroll_offset: usize,
+    ai_client: Option<AIClient>,
+    conversation: Option<Conversation>,
+    response_receiver: Option<mpsc::UnboundedReceiver<String>>,
+    current_response: String,
 }
 
 impl AISidebar {
@@ -49,19 +67,62 @@ impl AISidebar {
         }
     }
 
-    pub fn toggle(&mut self) {
-        self.is_open = !self.is_open;
-        if self.is_open && self.ai_client.is_none() {
-            // Initialize AI client when first opened
-            if let Ok(client) = AIClient::new() {
-                self.ai_client = Some(client);
-                self.conversation = Some(Conversation::new());
-                self.add_system_message("AI Assistant ready. How can I help you with your terminal session?");
+    pub fn update(&mut self, message: Message) {
+        match message {
+            Message::Toggle => {
+                self.is_open = !self.is_open;
+                if self.is_open && self.ai_client.is_none() {
+                    // Initialize AI client when first opened
+                    if let Ok(client) = AIClient::new() {
+                        self.ai_client = Some(client);
+                        self.conversation = Some(Conversation::new());
+                        self.add_system_message("AI Assistant ready. How can I help you with your terminal session?");
+                    }
+                }
+            }
+            Message::AddUserMessage(content) => {
+                self.add_user_message(content);
+            }
+            Message::AddAssistantMessage(content) => {
+                self.add_assistant_message(content);
+            }
+            Message::AddSystemMessage(content) => {
+                self.add_system_message(&content);
+            }
+            Message::SendChatMessage => {
+                self.send_message().unwrap();
+            }
+            Message::ProcessAIResponse => {
+                self.process_ai_response();
+            }
+            Message::AddChar(c) => {
+                self.add_char(c);
+            }
+            Message::RemoveChar => {
+                self.remove_char();
+            }
+            Message::ScrollUp => {
+                self.scroll_up();
+            }
+            Message::ScrollDown => {
+                self.scroll_down();
+            }
+            Message::ScrollToBottom => {
+                self.scroll_to_bottom();
+            }
+            Message::ClearChat => {
+                self.clear_chat();
+            }
+            Message::InjectTerminalContext(context) => {
+                self.inject_terminal_context(&context);
+            }
+            Message::Resize(new_width_percentage) => {
+                self.resize(new_width_percentage);
             }
         }
     }
 
-    pub fn add_message(&mut self, role: MessageRole, content: String) {
+    fn add_message(&mut self, role: MessageRole, content: String) {
         let message = ChatMessage {
             role,
             content,
@@ -78,7 +139,7 @@ impl AISidebar {
 
         // Add to conversation if available
         if let Some(ref mut conversation) = self.conversation {
-            conversation.add_message(Message {
+            conversation.add_message(AIChatMessage {
                 role: message.role,
                 content: message.content,
                 timestamp: message.timestamp,
@@ -90,19 +151,19 @@ impl AISidebar {
         self.scroll_to_bottom();
     }
 
-    pub fn add_system_message(&mut self, content: &str) {
+    fn add_system_message(&mut self, content: &str) {
         self.add_message(MessageRole::System, content.to_string());
     }
 
-    pub fn add_user_message(&mut self, content: String) {
+    fn add_user_message(&mut self, content: String) {
         self.add_message(MessageRole::User, content);
     }
 
-    pub fn add_assistant_message(&mut self, content: String) {
+    fn add_assistant_message(&mut self, content: String) {
         self.add_message(MessageRole::Assistant, content);
     }
 
-    pub fn send_message(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_message(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.input_buffer.trim().is_empty() || self.is_loading {
             return Ok(());
         }
@@ -147,7 +208,7 @@ impl AISidebar {
         Ok(())
     }
 
-    pub fn process_ai_response(&mut self) {
+    fn process_ai_response(&mut self) {
         if let Some(ref mut receiver) = self.response_receiver {
             while let Ok(chunk) = receiver.try_recv() {
                 if chunk.starts_with("Error:") {
@@ -173,36 +234,36 @@ impl AISidebar {
         }
     }
 
-    pub fn add_char(&mut self, c: char) {
+    fn add_char(&mut self, c: char) {
         if !self.is_loading {
             self.input_buffer.push(c);
         }
     }
 
-    pub fn remove_char(&mut self) {
+    fn remove_char(&mut self) {
         if !self.is_loading {
             self.input_buffer.pop();
         }
     }
 
-    pub fn scroll_up(&mut self) {
+    fn scroll_up(&mut self) {
         if self.scroll_offset > 0 {
             self.scroll_offset -= 1;
         }
     }
 
-    pub fn scroll_down(&mut self) {
+    fn scroll_down(&mut self) {
         let max_scroll = self.messages.len().saturating_sub(1);
         if self.scroll_offset < max_scroll {
             self.scroll_offset += 1;
         }
     }
 
-    pub fn scroll_to_bottom(&mut self) {
+    fn scroll_to_bottom(&mut self) {
         self.scroll_offset = self.messages.len().saturating_sub(1);
     }
 
-    pub fn clear_chat(&mut self) {
+    fn clear_chat(&mut self) {
         self.messages.clear();
         self.scroll_offset = 0;
         if let Some(ref mut conversation) = self.conversation {
@@ -211,12 +272,12 @@ impl AISidebar {
         self.add_system_message("Chat cleared. How can I help you?");
     }
 
-    pub fn inject_terminal_context(&mut self, context: &str) {
+    fn inject_terminal_context(&mut self, context: &str) {
         let context_message = format!("Terminal context: {}", context);
         self.add_system_message(&context_message);
     }
 
-    pub fn render<B: Backend>(&mut self, f: &mut Frame<B>, area: Rect) {
+    fn render<B: Backend>(&mut self, f: &mut Frame<B>, area: Rect) {
         if !self.is_open {
             return;
         }
@@ -360,11 +421,11 @@ impl AISidebar {
         lines
     }
 
-    pub fn resize(&mut self, new_width_percentage: u16) {
+    fn resize(&mut self, new_width_percentage: u16) {
         self.width_percentage = new_width_percentage.clamp(20, 50);
     }
 
-    pub fn get_conversation_summary(&self) -> String {
+    fn get_conversation_summary(&self) -> String {
         let message_count = self.messages.len();
         let user_messages = self.messages.iter()
             .filter(|m| matches!(m.role, MessageRole::User))
@@ -373,25 +434,19 @@ impl AISidebar {
         format!("Chat: {} messages ({} from user)", message_count, user_messages)
     }
 
-    pub fn view(&self) -> Element<crate::Message> {
-        container(
+    pub fn view(&mut self) -> Element<Message> {
+        if self.is_open {
             column![
-                text("AI Sidebar (Iced Placeholder)").size(20),
-                text("Chat with AI here...").size(16),
+                text("AI Sidebar").size(20),
+                text("This is where AI interactions and suggestions will appear."),
+                button(text("Close")).on_press(Message::Toggle),
             ]
             .spacing(10)
             .padding(10)
-        )
-        .width(iced::Length::Fill)
-        .height(iced::Length::Fill)
-        .style(iced::widget::container::Appearance {
-            background: Some(iced::Color::from_rgb(0.15, 0.15, 0.15).into()),
-            border_radius: 5.0.into(),
-            border_width: 1.0,
-            border_color: iced::Color::from_rgb(0.3, 0.3, 0.3),
-            ..Default::default()
-        })
-        .into()
+            .into()
+        } else {
+            column![].into()
+        }
     }
 }
 
@@ -410,8 +465,8 @@ mod tests {
     #[test]
     fn test_message_handling() {
         let mut sidebar = AISidebar::new();
-        sidebar.add_user_message("Hello".to_string());
-        sidebar.add_assistant_message("Hi there!".to_string());
+        sidebar.update(Message::AddUserMessage("Hello".to_string()));
+        sidebar.update(Message::AddAssistantMessage("Hi there!".to_string()));
         
         assert_eq!(sidebar.messages.len(), 2);
         assert!(matches!(sidebar.messages[0].role, MessageRole::User));
