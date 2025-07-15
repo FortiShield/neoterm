@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use futures_util::StreamExt; // For consuming reqwest response stream
 
-mod block;
+mod block; // Updated import path
 mod shell;
 mod input;
 mod renderer;
@@ -40,16 +40,15 @@ mod workflows;
 mod lpc;
 mod mcq;
 mod markdown_parser;
-mod api; // New API module
+mod api;
 
-use block::{Block, BlockContent};
+use block::{Block, BlockContent}; // Updated import
 use shell::ShellManager;
 use input::{EnhancedTextInput, Message as InputMessage, HistoryDirection, Direction};
 use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage};
 use config::AppConfig;
 use crate::{
     ui::{
-        block::CommandBlock,
         command_palette::{CommandPalette, CommandAction},
         ai_sidebar::AISidebar,
     },
@@ -63,12 +62,12 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
-    blocks: Vec<CommandBlock>,
+    blocks: Vec<Block>, // Changed from CommandBlock to Block
     input_bar: EnhancedTextInput,
     shell_manager: ShellManager,
     
     // Agent mode
-    agent_mode: Arc<RwLock<AgentMode>>, // Shared state for API
+    agent_mode: Arc<RwLock<AgentMode>>,
     agent_enabled: bool,
     agent_streaming: bool,
     
@@ -265,7 +264,7 @@ impl Application for NeoTerm {
             Message::AgentMessage(agent_msg) => {
                 match agent_msg {
                     AgentMessage::SystemMessage(content) => {
-                        let block = CommandBlock::new_agent_message(content);
+                        let block = Block::new_agent_message(content); // Changed from CommandBlock to Block
                         self.blocks.push(block);
                     }
                     _ => { /* Other agent messages handled by API */ }
@@ -281,7 +280,7 @@ impl Application for NeoTerm {
                 Command::none()
             }
             Message::AgentError(error) => {
-                let block = CommandBlock::new_error(format!("Agent error: {}", error));
+                let block = Block::new_error(format!("Agent error: {}", error)); // Changed from CommandBlock to Block
                 self.blocks.push(block);
                 self.agent_streaming = false;
                 Command::none()
@@ -397,10 +396,10 @@ impl NeoTerm {
     fn handle_ai_command(&mut self, command: String) -> Command<Message> {
         let prompt = command.trim_start_matches('#').trim_start_matches("/ai").trim().to_string();
         
-        let user_block = CommandBlock::new_user_message(command.clone());
+        let user_block = Block::new_user_message(command.clone()); // Changed from CommandBlock to Block
         self.blocks.push(user_block);
         
-        let agent_block = CommandBlock::new_agent_message(String::new());
+        let agent_block = Block::new_agent_message(String::new()); // Changed from CommandBlock to Block
         let agent_block_id = agent_block.id.clone();
         self.blocks.push(agent_block);
         self.agent_streaming = true;
@@ -410,7 +409,7 @@ impl NeoTerm {
                 let client = reqwest::Client::new();
                 let request_body = api::ai::AiRequest {
                     prompt,
-                    context_block_id: None, // TODO: Add context from selected block
+                    context_block_id: None,
                 };
 
                 let response = client
@@ -436,10 +435,6 @@ impl NeoTerm {
                                                         return Ok(Message::AgentStreamingChunk(full_response));
                                                     }
                                                     full_response.push_str(&ai_chunk.content);
-                                                    // Send partial updates to UI
-                                                    // This requires a channel back to the main update loop
-                                                    // For now, we'll send the full response at the end.
-                                                    // A more robust solution would involve a dedicated channel for streaming UI updates.
                                                 }
                                             }
                                         }
@@ -447,7 +442,7 @@ impl NeoTerm {
                                     Err(e) => return Err(format!("Stream error: {}", e)),
                                 }
                             }
-                            Ok(Message::AgentStreamingChunk(full_response)) // Fallback if stream ends without done signal
+                            Ok(Message::AgentStreamingChunk(full_response))
                         } else {
                             let error_text = resp.text().await.unwrap_or_else(|_| "Unknown API error".to_string());
                             Err(format!("API error: Status {} - {}", resp.status(), error_text))
@@ -495,7 +490,7 @@ impl NeoTerm {
     }
 
     fn execute_command(&mut self, command: String) -> Command<Message> {
-        let command_block = CommandBlock::new_command(command.clone());
+        let command_block = Block::new_command(command.clone()); // Changed from CommandBlock to Block
         let block_id = command_block.id.clone();
         self.blocks.push(command_block);
         
@@ -558,13 +553,13 @@ impl NeoTerm {
     }
 
     fn add_sample_blocks(&mut self) {
-        let welcome_block = CommandBlock::new_info(
+        let welcome_block = Block::new_info( // Changed from CommandBlock to Block
             "Welcome to NeoPilot Terminal".to_string(),
             "This is a next-generation terminal with AI assistance.\nPress 'p' to open the command palette.\nPress 'a' to toggle the AI sidebar.\nPress 'F1' to run performance benchmarks.\nUse Up/Down arrows for history, Tab for autocomplete.\nType # or /ai followed by your query to ask the AI."
         );
         
-        let sample_command = CommandBlock::new_command("$ echo 'Hello, NeoPilot!'".to_string());
-        let mut sample_output = CommandBlock::new_output("".to_string());
+        let sample_command = Block::new_command("$ echo 'Hello, NeoPilot!'".to_string()); // Changed from CommandBlock to Block
+        let mut sample_output = Block::new_output("".to_string()); // Changed from CommandBlock to Block
         sample_output.add_output_line("Hello, NeoPilot!".to_string(), true);
         sample_output.set_status("Completed with exit code: 0".to_string());
         
