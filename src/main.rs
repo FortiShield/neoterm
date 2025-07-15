@@ -1,5 +1,6 @@
 use iced::{executor, Application, Command, Element, Settings, Theme};
 use iced::widget::{column, container, scrollable, text_input, button, row, text};
+use iced::keyboard::{self, KeyCode, Modifiers}; // Import keyboard module
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -40,7 +41,7 @@ mod markdown_parser;
 
 use block::{Block, BlockContent}; // This Block is for Iced
 use shell::ShellManager;
-use input::EnhancedTextInput;
+use input::{EnhancedTextInput, Message as InputMessage, HistoryDirection, Direction}; // Import EnhancedTextInput and its Message
 use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage};
 use config::AppConfig;
 use crate::{
@@ -60,13 +61,8 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
     blocks: Vec<CommandBlock>, // Now stores Iced CommandBlock
-    current_input: String,
-    input_history: Vec<String>,
-    history_index: Option<usize>,
+    input_bar: EnhancedTextInput, // Use EnhancedTextInput
     shell_manager: ShellManager,
-    input_state: text_input::State,
-    suggestions: Vec<String>,
-    active_suggestion: Option<usize>,
     
     // Agent mode
     agent_mode: Option<AgentMode>,
@@ -84,13 +80,10 @@ pub struct NeoTerm {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    InputChanged(String),
+    Input(InputMessage), // Wrap input bar messages
     ExecuteCommand,
     PtyOutput(PtyMessage), // Message from PTY async task
-    KeyPressed(iced::keyboard::Key),
-    HistoryUp,
-    HistoryDown,
-    SuggestionSelected(usize),
+    KeyboardEvent(keyboard::Event), // Capture all keyboard events
     BlockAction(Uuid, BlockMessage),
     Tick,
     
@@ -165,13 +158,8 @@ impl Application for NeoTerm {
         (
             Self {
                 blocks: Vec::new(),
-                current_input: String::new(),
-                input_history: Vec::new(),
-                history_index: None,
+                input_bar: EnhancedTextInput::new(), // Initialize EnhancedTextInput
                 shell_manager,
-                input_state: text_input::State::new(),
-                suggestions: Vec::new(),
-                active_suggestion: None,
                 agent_mode,
                 agent_enabled: false,
                 agent_streaming: false,
@@ -194,81 +182,32 @@ impl Application for NeoTerm {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::InputChanged(input) => {
-                self.current_input = input.clone();
-                self.suggestions = self.generate_suggestions(&input);
-                Command::none()
+            Message::Input(input_message) => {
+                match input_message {
+                    InputMessage::Submit => {
+                        // When input bar submits, execute command
+                        let command = self.input_bar.value().to_string();
+                        self.input_bar.update(InputMessage::Submit); // Let input bar clear itself and add to history
+                        if !command.trim().is_empty() {
+                            if self.agent_enabled && self.agent_mode.is_some() {
+                                self.handle_agent_command(command)
+                            } else {
+                                self.execute_command(command)
+                            }
+                        } else {
+                            Command::none()
+                        }
+                    }
+                    _ => {
+                        self.input_bar.update(input_message);
+                        Command::none()
+                    }
+                }
             }
             Message::ExecuteCommand => {
-                if !self.current_input.trim().is_empty() {
-                    let command = self.current_input.clone();
-                    self.input_history.push(command.clone());
-                    self.history_index = None;
-                    
-                    if self.agent_enabled && self.agent_mode.is_some() {
-                        self.handle_agent_command(command)
-                    } else {
-                        let command_block = CommandBlock::new_command(command.clone());
-                        let block_id = command_block.id.clone();
-                        self.blocks.push(command_block);
-                        self.current_input.clear();
-                        
-                        let env_vars = self.config.env_profiles.active_profile
-                            .as_ref()
-                            .and_then(|name| self.config.env_profiles.profiles.get(name))
-                            .map(|profile| profile.variables.clone());
-
-                        let pty_tx = self.pty_tx.clone();
-                        Command::perform(
-                            async move {
-                                let mut output_receiver = PtyManager::new().execute_command(&command, &[], env_vars).await.unwrap();
-                                while let Some(output) = output_receiver.recv().await {
-                                    match output.status {
-                                        CommandStatus::Running => {
-                                            if !output.stdout.is_empty() {
-                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
-                                                    block_id: block_id.clone(),
-                                                    content: output.stdout,
-                                                    is_stdout: true,
-                                                }).await;
-                                            }
-                                            if !output.stderr.is_empty() {
-                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
-                                                    block_id: block_id.clone(),
-                                                    content: output.stderr,
-                                                    is_stdout: false,
-                                                }).await;
-                                            }
-                                        }
-                                        CommandStatus::Completed(exit_code) => {
-                                            let _ = pty_tx.send(PtyMessage::Completed {
-                                                block_id: block_id.clone(),
-                                                exit_code,
-                                            }).await;
-                                            break;
-                                        }
-                                        CommandStatus::Failed(error) => {
-                                            let _ = pty_tx.send(PtyMessage::Failed {
-                                                block_id: block_id.clone(),
-                                                error,
-                                            }).await;
-                                            break;
-                                        }
-                                        CommandStatus::Killed => {
-                                            let _ = pty_tx.send(PtyMessage::Killed {
-                                                block_id: block_id.clone(),
-                                            }).await;
-                                            break;
-                                        }
-                                    }
-                                }
-                            },
-                            |_| Message::Tick // Send a generic tick to trigger UI update
-                        )
-                    }
-                } else {
-                    Command::none()
-                }
+                // This message is now primarily triggered by the InputMessage::Submit
+                // or other internal logic, not directly from the view.
+                Command::none()
             }
             Message::PtyOutput(pty_msg) => {
                 if let Some(block) = self.blocks.iter_mut().find(|b| b.id == pty_msg.get_block_id()) {
@@ -344,51 +283,39 @@ impl Application for NeoTerm {
                 self.settings_open = !self.settings_open;
                 Command::none()
             }
-            Message::HistoryUp => {
-                if !self.input_history.is_empty() {
-                    let new_index = match self.history_index {
-                        None => Some(self.input_history.len() - 1),
-                        Some(i) if i > 0 => Some(i - 1),
-                        Some(i) => Some(i),
-                    };
-                    
-                    if let Some(index) = new_index {
-                        self.current_input = self.input_history[index].clone();
-                        self.history_index = new_index;
-                    }
-                }
-                Command::none()
-            }
-            Message::HistoryDown => {
-                match self.history_index {
-                    Some(i) if i < self.input_history.len() - 1 => {
-                        self.history_index = Some(i + 1);
-                        self.current_input = self.input_history[i + 1].clone();
-                    }
-                    Some(_) => {
-                        self.history_index = None;
-                        self.current_input.clear();
-                    }
-                    None => {}
-                }
-                Command::none()
-            }
             Message::BlockAction(block_id, action) => {
                 self.handle_block_action(block_id, action)
             }
             Message::Tick => {
-                // Used to trigger UI redraws for streaming output
                 Command::none()
             }
-            Message::KeyPressed(_) => Command::none(), // Placeholder for keyboard events
-            Message::SuggestionSelected(_) => Command::none(), // Placeholder
+            Message::KeyboardEvent(event) => {
+                match event {
+                    keyboard::Event::KeyPressed { key_code, modifiers, .. } => {
+                        match key_code {
+                            KeyCode::Up => {
+                                self.input_bar.update(InputMessage::HistoryNavigated(HistoryDirection::Up));
+                            }
+                            KeyCode::Down => {
+                                self.input_bar.update(InputMessage::HistoryNavigated(HistoryDirection::Down));
+                            }
+                            KeyCode::Tab => {
+                                self.input_bar.update(InputMessage::NavigateSuggestions(Direction::Down));
+                                self.input_bar.update(InputMessage::ApplySuggestion); // Apply on tab
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                Command::none()
+            }
             Message::ConfigLoaded(_) => Command::none(), // Placeholder
             Message::ConfigSaved => Command::none(), // Placeholder
             Message::SettingsMessage(msg) => {
-                // Handle settings messages
                 let mut settings_view = settings::SettingsView::new(self.config.clone());
                 settings_view.update(msg);
-                self.config = settings_view.config; // Update main config from settings view
+                self.config = settings_view.config;
                 Command::none()
             }
         }
@@ -411,60 +338,6 @@ impl Application for NeoTerm {
         )
         .height(iced::Length::Fill);
 
-        let input_view = self.create_input_view();
-        let toolbar = self.create_toolbar();
-
-        column![toolbar, blocks_view, input_view]
-            .spacing(8)
-            .padding(16)
-            .into()
-    }
-
-    fn subscription(&self) -> iced::Subscription<Message> {
-        iced::Subscription::batch(vec![
-            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
-            self.pty_manager_subscription(),
-        ])
-    }
-}
-
-impl NeoTerm {
-    fn generate_suggestions(&self, input: &str) -> Vec<String> {
-        let mut suggestions = Vec::new();
-        
-        for cmd in &self.input_history {
-            if cmd.contains(input) && cmd != input {
-                suggestions.push(cmd.clone());
-            }
-        }
-        
-        let common_commands = ["ls", "cd", "git", "npm", "cargo", "docker", "kubectl"];
-        for cmd in &common_commands {
-            if cmd.starts_with(input) && !input.is_empty() {
-                suggestions.push(cmd.to_string());
-            }
-        }
-        
-        if self.agent_enabled {
-            let agent_suggestions = [
-                "explain this command:",
-                "help me with",
-                "what does this error mean:",
-                "how do I",
-                "show me how to",
-            ];
-            for suggestion in &agent_suggestions {
-                if suggestion.starts_with(input) && !input.is_empty() {
-                    suggestions.push(suggestion.to_string());
-                }
-            }
-        }
-        
-        suggestions.truncate(5);
-        suggestions
-    }
-
-    fn create_input_view(&self) -> Element<Message> {
         let prompt_indicator = if self.agent_enabled {
             "🤖 "
         } else {
@@ -477,39 +350,26 @@ impl NeoTerm {
             "Enter command..."
         };
 
-        let input = text_input(placeholder, &self.current_input)
-            .on_input(Message::InputChanged)
-            .on_submit(Message::ExecuteCommand)
-            .padding(12)
-            .size(16);
+        let input_view = self.input_bar.view(prompt_indicator, placeholder).map(Message::Input); // Map input bar messages
 
-        let input_with_prompt = row![
-            text(prompt_indicator).size(16),
-            input
-        ].spacing(8);
+        let toolbar = self.create_toolbar();
 
-        let suggestions_view = if !self.suggestions.is_empty() {
-            column(
-                self.suggestions
-                    .iter()
-                    .enumerate()
-                    .map(|(i, suggestion)| {
-                        button(text(suggestion))
-                            .on_press(Message::SuggestionSelected(i))
-                            .width(iced::Length::Fill)
-                            .into()
-                    })
-                    .collect::<Vec<_>>()
-            )
-            .spacing(2)
+        column![toolbar, blocks_view, input_view]
+            .spacing(8)
+            .padding(16)
             .into()
-        } else {
-            column![].into()
-        };
-
-        column![input_with_prompt, suggestions_view].spacing(4).into()
     }
 
+    fn subscription(&self) -> iced::Subscription<Message> {
+        iced::Subscription::batch(vec![
+            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
+            self.pty_manager_subscription(),
+            keyboard::Event::all().map(Message::KeyboardEvent), // Subscribe to all keyboard events
+        ])
+    }
+}
+
+impl NeoTerm {
     fn create_toolbar(&self) -> Element<Message> {
         let agent_button = button(
             text(if self.agent_enabled { "🤖 Agent ON" } else { "🤖 Agent OFF" })
@@ -529,8 +389,6 @@ impl NeoTerm {
 
     fn handle_agent_command(&mut self, command: String) -> Command<Message> {
         if let Some(ref mut agent) = self.agent_mode {
-            self.current_input.clear();
-            
             let user_block = CommandBlock::new_user_message(command.clone());
             self.blocks.push(user_block);
             
@@ -644,10 +502,73 @@ impl NeoTerm {
         }
     }
 
+    fn execute_command(&mut self, command: String) -> Command<Message> {
+        let command_block = CommandBlock::new_command(command.clone());
+        let block_id = command_block.id.clone();
+        self.blocks.push(command_block);
+        
+        let env_vars = self.config.env_profiles.active_profile
+            .as_ref()
+            .and_then(|name| self.config.env_profiles.profiles.get(name))
+            .map(|profile| profile.variables.clone());
+
+        let pty_tx = self.pty_tx.clone();
+        Command::perform(
+            async move {
+                let parts: Vec<&str> = command.split_whitespace().collect();
+                let cmd = parts[0];
+                let args = &parts[1..];
+
+                let mut output_receiver = PtyManager::new().execute_command(cmd, args, env_vars).await.unwrap();
+                while let Some(output) = output_receiver.recv().await {
+                    match output.status {
+                        CommandStatus::Running => {
+                            if !output.stdout.is_empty() {
+                                let _ = pty_tx.send(PtyMessage::OutputChunk {
+                                    block_id: block_id.clone(),
+                                    content: output.stdout,
+                                    is_stdout: true,
+                                }).await;
+                            }
+                            if !output.stderr.is_empty() {
+                                let _ = pty_tx.send(PtyMessage::OutputChunk {
+                                    block_id: block_id.clone(),
+                                    content: output.stderr,
+                                    is_stdout: false,
+                                }).await;
+                            }
+                        }
+                        CommandStatus::Completed(exit_code) => {
+                            let _ = pty_tx.send(PtyMessage::Completed {
+                                block_id: block_id.clone(),
+                                exit_code,
+                            }).await;
+                            break;
+                        }
+                        CommandStatus::Failed(error) => {
+                            let _ = pty_tx.send(PtyMessage::Failed {
+                                block_id: block_id.clone(),
+                                error,
+                            }).await;
+                            break;
+                        }
+                        CommandStatus::Killed => {
+                            let _ = pty_tx.send(PtyMessage::Killed {
+                                block_id: block_id.clone(),
+                            }).await;
+                            break;
+                        }
+                    }
+                }
+            },
+            |_| Message::Tick
+        )
+    }
+
     fn add_sample_blocks(&mut self) {
         let welcome_block = CommandBlock::new_info(
             "Welcome to NeoPilot Terminal".to_string(),
-            "This is a next-generation terminal with AI assistance.\nPress 'p' to open the command palette.\nPress 'a' to toggle the AI sidebar.\nPress 'F1' to run performance benchmarks.".to_string()
+            "This is a next-generation terminal with AI assistance.\nPress 'p' to open the command palette.\nPress 'a' to toggle the AI sidebar.\nPress 'F1' to run performance benchmarks.\nUse Up/Down arrows for history, Tab for autocomplete.".to_string()
         );
         
         let sample_command = CommandBlock::new_command("$ echo 'Hello, NeoPilot!'".to_string());

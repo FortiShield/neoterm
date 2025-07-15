@@ -1,7 +1,5 @@
-use iced::{Element, widget::{text_input, column, row, container}};
+use iced::{Element, widget::{text_input, column, row, container, button, text}};
 use std::collections::VecDeque;
-
-use crate::Message;
 
 #[derive(Debug, Clone)]
 pub struct EnhancedTextInput {
@@ -10,15 +8,15 @@ pub struct EnhancedTextInput {
     active_suggestion: Option<usize>,
     history: VecDeque<String>,
     history_index: Option<usize>,
-    syntax_tree: Option<SyntaxTree>,
+    // syntax_tree: Option<SyntaxTree>, // Not used in this phase, keep for future
 }
 
 #[derive(Debug, Clone)]
 pub struct Suggestion {
-    text: String,
-    description: Option<String>,
-    suggestion_type: SuggestionType,
-    score: f32,
+    pub text: String,
+    pub description: Option<String>,
+    pub suggestion_type: SuggestionType,
+    pub score: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -31,39 +29,62 @@ pub enum SuggestionType {
     Alias,
 }
 
-#[derive(Debug, Clone)]
-pub struct SyntaxTree {
-    tokens: Vec<Token>,
-    errors: Vec<SyntaxError>,
-}
+// Not used in this phase, keep for future
+// #[derive(Debug, Clone)]
+// pub struct SyntaxTree {
+//     tokens: Vec<Token>,
+//     errors: Vec<SyntaxError>,
+// }
+
+// #[derive(Debug, Clone)]
+// pub struct Token {
+//     text: String,
+//     token_type: TokenType,
+//     start: usize,
+//     end: usize,
+// }
+
+// #[derive(Debug, Clone)]
+// pub enum TokenType {
+//     Command,
+//     Argument,
+//     Flag,
+//     String,
+//     Number,
+//     Operator,
+//     Pipe,
+//     Redirect,
+//     Variable,
+//     Comment,
+// }
+
+// #[derive(Debug, Clone)]
+// pub struct SyntaxError {
+//     message: String,
+//     position: usize,
+//     length: usize,
+// }
 
 #[derive(Debug, Clone)]
-pub struct Token {
-    text: String,
-    token_type: TokenType,
-    start: usize,
-    end: usize,
+pub enum Message {
+    InputChanged(String),
+    Submit,
+    SuggestionSelected(usize),
+    NavigateSuggestions(Direction),
+    ApplySuggestion,
+    HistoryNavigated(HistoryDirection),
 }
 
-#[derive(Debug, Clone)]
-pub enum TokenType {
-    Command,
-    Argument,
-    Flag,
-    String,
-    Number,
-    Operator,
-    Pipe,
-    Redirect,
-    Variable,
-    Comment,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
 }
 
-#[derive(Debug, Clone)]
-pub struct SyntaxError {
-    message: String,
-    position: usize,
-    length: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryDirection {
+    Up,
+    Down,
 }
 
 impl EnhancedTextInput {
@@ -74,14 +95,69 @@ impl EnhancedTextInput {
             active_suggestion: None,
             history: VecDeque::new(),
             history_index: None,
-            syntax_tree: None,
+            // syntax_tree: None,
         }
     }
 
-    pub fn update_value(&mut self, value: String) {
-        self.value = value;
-        self.update_syntax_tree();
-        self.update_suggestions();
+    pub fn update(&mut self, message: Message) {
+        match message {
+            Message::InputChanged(value) => {
+                self.value = value;
+                // self.update_syntax_tree(); // Not used in this phase
+                self.update_suggestions();
+                self.active_suggestion = None; // Reset active suggestion on input change
+            }
+            Message::Submit => {
+                // Handled by parent, but we can clear input here
+                self.add_to_history(self.value.clone());
+                self.value.clear();
+                self.suggestions.clear();
+                self.active_suggestion = None;
+            }
+            Message::SuggestionSelected(index) => {
+                if let Some(suggestion) = self.suggestions.get(index) {
+                    self.value = suggestion.text.clone();
+                    self.suggestions.clear(); // Clear suggestions after selection
+                    self.active_suggestion = None;
+                }
+            }
+            Message::NavigateSuggestions(direction) => {
+                if self.suggestions.is_empty() {
+                    return;
+                }
+                let new_index = match self.active_suggestion {
+                    Some(i) => match direction {
+                        Direction::Up => i.checked_sub(1).unwrap_or(self.suggestions.len() - 1),
+                        Direction::Down => (i + 1) % self.suggestions.len(),
+                    },
+                    None => match direction {
+                        Direction::Up => self.suggestions.len() - 1,
+                        Direction::Down => 0,
+                    },
+                };
+                self.active_suggestion = Some(new_index);
+            }
+            Message::ApplySuggestion => {
+                if let Some(index) = self.active_suggestion {
+                    if let Some(suggestion) = self.suggestions.get(index) {
+                        self.value = suggestion.text.clone();
+                        self.suggestions.clear();
+                        self.active_suggestion = None;
+                    }
+                }
+            }
+            Message::HistoryNavigated(direction) => {
+                if let Some(cmd) = self.navigate_history(direction) {
+                    self.value = cmd;
+                    self.suggestions.clear(); // Clear suggestions when navigating history
+                    self.active_suggestion = None;
+                }
+            }
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
     }
 
     pub fn add_to_history(&mut self, command: String) {
@@ -94,7 +170,7 @@ impl EnhancedTextInput {
         self.history_index = None;
     }
 
-    pub fn navigate_history(&mut self, direction: HistoryDirection) -> Option<String> {
+    fn navigate_history(&mut self, direction: HistoryDirection) -> Option<String> {
         match direction {
             HistoryDirection::Up => {
                 let new_index = match self.history_index {
@@ -126,70 +202,70 @@ impl EnhancedTextInput {
         }
     }
 
-    fn update_syntax_tree(&mut self) {
-        self.syntax_tree = Some(self.parse_command(&self.value));
-    }
+    // fn update_syntax_tree(&mut self) {
+    //     self.syntax_tree = Some(self.parse_command(&self.value));
+    // }
 
-    fn parse_command(&self, input: &str) -> SyntaxTree {
-        let mut tokens = Vec::new();
-        let mut errors = Vec::new();
-        let mut current_pos = 0;
+    // fn parse_command(&self, input: &str) -> SyntaxTree {
+    //     // Simple tokenizer - in a real implementation, you'd use a proper parser
+    //     let mut tokens = Vec::new();
+    //     let mut errors = Vec::new();
+    //     let mut current_pos = 0;
 
-        // Simple tokenizer - in a real implementation, you'd use a proper parser
-        let words: Vec<&str> = input.split_whitespace().collect();
+    //     let words: Vec<&str> = input.split_whitespace().collect();
         
-        for (i, word) in words.iter().enumerate() {
-            let token_type = if i == 0 {
-                TokenType::Command
-            } else if word.starts_with('-') {
-                TokenType::Flag
-            } else if word.starts_with('$') {
-                TokenType::Variable
-            } else if word.contains('|') {
-                TokenType::Pipe
-            } else if word.contains('>') || word.contains('<') {
-                TokenType::Redirect
-            } else if word.starts_with('"') || word.starts_with('\'') {
-                TokenType::String
-            } else if word.parse::<f64>().is_ok() {
-                TokenType::Number
-            } else {
-                TokenType::Argument
-            };
+    //     for (i, word) in words.iter().enumerate() {
+    //         let token_type = if i == 0 {
+    //             TokenType::Command
+    //         } else if word.starts_with('-') {
+    //             TokenType::Flag
+    //         } else if word.starts_with('$') {
+    //             TokenType::Variable
+    //         } else if word.contains('|') {
+    //             TokenType::Pipe
+    //         } else if word.contains('>') || word.contains('<') {
+    //             TokenType::Redirect
+    //         } else if word.starts_with('"') || word.starts_with('\'') {
+    //             TokenType::String
+    //         } else if word.parse::<f64>().is_ok() {
+    //             TokenType::Number
+    //         } else {
+    //             TokenType::Argument
+    //         };
 
-            tokens.push(Token {
-                text: word.to_string(),
-                token_type,
-                start: current_pos,
-                end: current_pos + word.len(),
-            });
+    //         tokens.push(Token {
+    //             text: word.to_string(),
+    //             token_type,
+    //             start: current_pos,
+    //             end: current_pos + word.len(),
+    //         });
 
-            current_pos += word.len() + 1; // +1 for space
-        }
+    //         current_pos += word.len() + 1; // +1 for space
+    //     }
 
-        SyntaxTree { tokens, errors }
-    }
+    //     SyntaxTree { tokens, errors }
+    // }
 
     fn update_suggestions(&mut self) {
         let mut suggestions = Vec::new();
         
-        // Generate suggestions based on current input
         if let Some(last_word) = self.value.split_whitespace().last() {
-            // Command suggestions
+            // Command suggestions (only if it's the first word or empty)
             if self.value.split_whitespace().count() <= 1 {
                 suggestions.extend(self.get_command_suggestions(last_word));
             }
             
-            // File/directory suggestions
-            suggestions.extend(self.get_file_suggestions(last_word));
-            
-            // History suggestions
+            // History suggestions (always relevant)
             suggestions.extend(self.get_history_suggestions(last_word));
+
+            // File/directory suggestions (placeholder for now)
+            // In a real implementation, you'd scan the filesystem based on the current path
+            // suggestions.extend(self.get_file_suggestions(last_word));
         }
 
-        // Sort by score
+        // Sort by score (higher is better)
         suggestions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        suggestions.truncate(10);
+        suggestions.truncate(10); // Limit to top 10 suggestions
 
         self.suggestions = suggestions;
     }
@@ -200,6 +276,7 @@ impl EnhancedTextInput {
             "grep", "find", "which", "whereis", "man", "info", "help", "history",
             "ps", "top", "htop", "kill", "killall", "jobs", "bg", "fg", "nohup",
             "git", "npm", "yarn", "cargo", "docker", "kubectl", "ssh", "scp", "rsync",
+            "echo", "ping", "curl", "wget", "chmod", "chown", "df", "du", "tar", "zip", "unzip",
         ];
 
         common_commands
@@ -214,7 +291,7 @@ impl EnhancedTextInput {
             .collect()
     }
 
-    fn get_file_suggestions(&self, prefix: &str) -> Vec<Suggestion> {
+    fn get_file_suggestions(&self, _prefix: &str) -> Vec<Suggestion> {
         // In a real implementation, you'd scan the filesystem
         // For now, return empty suggestions
         Vec::new()
@@ -223,13 +300,13 @@ impl EnhancedTextInput {
     fn get_history_suggestions(&self, prefix: &str) -> Vec<Suggestion> {
         self.history
             .iter()
-            .filter(|cmd| cmd.contains(prefix))
-            .take(5)
+            .filter(|cmd| cmd.contains(prefix) && cmd != &self.value) // Don't suggest current input
+            .take(5) // Limit history suggestions
             .map(|cmd| Suggestion {
                 text: cmd.clone(),
                 description: Some("From history".to_string()),
                 suggestion_type: SuggestionType::History,
-                score: self.calculate_fuzzy_score(cmd, prefix),
+                score: self.calculate_fuzzy_score(cmd, prefix) * 0.9, // Slightly lower score for history
             })
             .collect()
     }
@@ -243,17 +320,23 @@ impl EnhancedTextInput {
             "npm" => "Node package manager".to_string(),
             "cargo" => "Rust package manager".to_string(),
             "docker" => "Container management".to_string(),
+            "echo" => "Display a line of text".to_string(),
+            "ping" => "Send ICMP ECHO_REQUEST packets to network hosts".to_string(),
+            "curl" => "Transfer data from or to a server".to_string(),
             _ => format!("Execute {}", command),
         }
     }
 
     fn calculate_fuzzy_score(&self, text: &str, query: &str) -> f32 {
+        if query.is_empty() {
+            return 0.0;
+        }
         if text.starts_with(query) {
-            1.0
+            1.0 // Exact prefix match is highest score
         } else if text.contains(query) {
-            0.7
+            0.7 // Contains query
         } else {
-            // Simple fuzzy matching - in a real implementation, use a proper fuzzy matching library
+            // Simple subsequence matching
             let mut score = 0.0;
             let mut query_chars = query.chars().peekable();
             
@@ -270,12 +353,17 @@ impl EnhancedTextInput {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
-        let input = text_input("Enter command...", &self.value)
+    pub fn view(&self, prompt_indicator: &str, placeholder: &str) -> Element<Message> {
+        let input = text_input(placeholder, &self.value)
             .on_input(Message::InputChanged)
-            .on_submit(Message::ExecuteCommand)
+            .on_submit(Message::Submit)
             .padding(12)
             .size(16);
+
+        let input_with_prompt = row![
+            text(prompt_indicator).size(16),
+            input
+        ].spacing(8);
 
         let suggestions_view = if !self.suggestions.is_empty() {
             let suggestion_elements: Vec<Element<Message>> = self.suggestions
@@ -286,15 +374,15 @@ impl EnhancedTextInput {
                     
                     container(
                         row![
-                            iced::widget::text(&suggestion.text).size(14),
+                            text(&suggestion.text).size(14),
                             if let Some(desc) = &suggestion.description {
-                                iced::widget::text(desc)
+                                text(desc)
                                     .size(12)
                                     .style(|theme| iced::widget::text::Appearance {
                                         color: Some(theme.palette().text.scale_alpha(0.7)),
                                     })
                             } else {
-                                iced::widget::text("")
+                                text("")
                             }
                         ]
                         .spacing(8)
@@ -310,6 +398,7 @@ impl EnhancedTextInput {
                             container::Appearance::default()
                         }
                     })
+                    .on_press(Message::SuggestionSelected(i)) // Click to select
                     .into()
                 })
                 .collect();
@@ -330,12 +419,6 @@ impl EnhancedTextInput {
             column![].into()
         };
 
-        column![input, suggestions_view].spacing(4).into()
+        column![input_with_prompt, suggestions_view].spacing(4).into()
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum HistoryDirection {
-    Up,
-    Down,
 }

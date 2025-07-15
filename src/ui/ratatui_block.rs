@@ -1,34 +1,36 @@
-// This file contains the previous ratatui block rendering logic.
-// It is kept for reference but is no longer used by src/main.rs in GUI mode.
+// This file is kept for historical reference of the Ratatui implementation
+// and is no longer used by src/main.rs in GUI mode.
 
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span}, // Import Line and Span
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use std::collections::VecDeque;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct CollapsibleBlock {
+    pub id: String,
+    pub title: Line<'static>,
+    pub content: VecDeque<Line<'static>>,
+    pub is_collapsed: bool,
+    pub block_type: BlockType,
+    pub scroll_offset: usize, // Current scroll position
+    pub max_scroll_offset: usize, // Maximum scrollable lines
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockType {
     Command,
     Output,
-    Error,
     Info,
+    Error,
     AgentMessage,
     UserMessage,
-}
-
-#[derive(Debug, Clone)]
-pub struct CollapsibleBlock {
-    pub id: String,
-    pub title: Line<'static>, // Changed to Line
-    pub content: Vec<Line<'static>>, // Changed to Vec<Line>
-    pub block_type: BlockType,
-    pub collapsed: bool,
-    pub scroll_offset: u16,
 }
 
 impl CollapsibleBlock {
@@ -36,55 +38,37 @@ impl CollapsibleBlock {
         Self {
             id: Uuid::new_v4().to_string(),
             title,
-            content: Vec::new(),
+            content: VecDeque::new(),
+            is_collapsed: false,
             block_type,
-            collapsed: false,
             scroll_offset: 0,
+            max_scroll_offset: 0,
         }
     }
 
-    pub fn add_line(&mut self, line: Line<'static>) { // Accepts Line directly
-        self.content.push(line);
-        // Adjust scroll offset to keep new content in view if not collapsed
-        if !self.collapsed {
-            self.scroll_offset = self.content.len().saturating_sub(1) as u16;
+    pub fn add_line(&mut self, line: Line<'static>) {
+        self.content.push_back(line);
+        self.max_scroll_offset = self.content.len().saturating_sub(1); // Update max scroll
+        // Keep scroll at bottom if it was already at bottom
+        if self.scroll_offset == self.max_scroll_offset.saturating_sub(1) || self.scroll_offset == 0 {
+            self.scroll_offset = self.max_scroll_offset;
         }
     }
 
     pub fn toggle_collapse(&mut self) {
-        self.collapsed = !self.collapsed;
-        if !self.collapsed {
-            // Reset scroll offset when uncollapsed
-            self.scroll_offset = self.content.len().saturating_sub(1) as u16;
-        }
+        self.is_collapsed = !self.is_collapsed;
     }
 
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
-    pub fn scroll_down(&mut self, max_lines: u16) {
-        self.scroll_offset = (self.scroll_offset + 1).min(self.content.len().saturating_sub(1).max(0) as u16);
-        // Ensure scroll_offset doesn't go beyond the visible area if content is small
-        if self.content.len() as u16 <= max_lines {
-            self.scroll_offset = 0;
-        } else {
-            self.scroll_offset = self.scroll_offset.min(self.content.len().saturating_sub(max_lines).max(0) as u16);
-        }
-    }
-
-    pub fn get_border_color(&self) -> Color {
-        match self.block_type {
-            BlockType::Command => Color::Blue,
-            BlockType::Output => Color::Green,
-            BlockType::Error => Color::Red,
-            BlockType::Info => Color::Cyan,
-            BlockType::AgentMessage => Color::Magenta,
-            BlockType::UserMessage => Color::Yellow,
-        }
+    pub fn scroll_down(&mut self) {
+        self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll_offset);
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct CollapsibleBlockRenderer {
     pub blocks: Vec<CollapsibleBlock>,
     pub selected_index: usize,
@@ -103,75 +87,85 @@ impl CollapsibleBlockRenderer {
         self.selected_index = self.blocks.len().saturating_sub(1); // Select the newly added block
     }
 
+    pub fn move_selection_up(&mut self) {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+        }
+    }
+
+    pub fn move_selection_down(&mut self) {
+        if self.selected_index < self.blocks.len().saturating_sub(1) {
+            self.selected_index += 1;
+        }
+    }
+
     pub fn toggle_selected_block(&mut self) {
         if let Some(block) = self.blocks.get_mut(self.selected_index) {
             block.toggle_collapse();
         }
     }
 
-    pub fn move_selection_up(&mut self) {
-        self.selected_index = self.selected_index.saturating_sub(1);
-    }
-
-    pub fn move_selection_down(&mut self) {
-        self.selected_index = (self.selected_index + 1).min(self.blocks.len().saturating_sub(1));
-    }
-
     pub fn render<B: Backend>(&mut self, f: &mut Frame<B>, area: Rect) {
-        let mut constraints = Vec::new();
-        let mut visible_block_indices = Vec::new();
-
-        // Calculate constraints for visible blocks
-        for (i, block) in self.blocks.iter().enumerate() {
-            if block.collapsed {
-                constraints.push(Constraint::Length(3)); // Title + borders
+        let block_heights: Vec<Constraint> = self.blocks.iter().map(|block| {
+            if block.is_collapsed {
+                Constraint::Length(3) // Header + borders
             } else {
-                // Estimate content height + title + borders
-                // This is a rough estimate, actual height depends on wrap
-                let content_height = block.content.len() as u16;
-                constraints.push(Constraint::Length(content_height.saturating_add(3).min(area.height)));
+                // Estimate content height + header + borders
+                let content_lines = block.content.len() as u16;
+                Constraint::Length(content_lines.saturating_add(3).min(area.height / 3)) // Max 1/3 of screen height
             }
-            visible_block_indices.push(i);
-        }
+        }).collect();
 
-        if constraints.is_empty() {
-            return;
-        }
+        let total_height: u16 = block_heights.iter().map(|c| match c {
+            Constraint::Length(l) => *l,
+            _ => 0, // Should not happen with Length constraints
+        }).sum();
+
+        // If total height exceeds area, make blocks fill remaining space
+        let constraints = if total_height > area.height {
+            self.blocks.iter().map(|block| {
+                if block.is_collapsed {
+                    Constraint::Length(3)
+                } else {
+                    Constraint::Min(0) // Allow flexible height for non-collapsed blocks
+                }
+            }).collect()
+        } else {
+            block_heights
+        };
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
-            .spacing(1)
             .split(area);
 
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            if let Some(block_data) = self.blocks.get_mut(visible_block_indices[i]) {
-                let is_selected = self.selected_index == visible_block_indices[i];
-                let border_color = block_data.get_border_color();
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            if let Some(chunk) = chunks.get(i) {
+                let is_selected = i == self.selected_index;
+                let border_style = if is_selected {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else if block.block_type == BlockType::Error {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
 
-                let block_widget = Block::default()
+                let inner_block = Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color))
-                    .title(block_data.title.clone()) // Use Line as title
-                    .border_type(if is_selected {
-                        ratatui::widgets::BorderType::Thick
-                    } else {
-                        ratatui::widgets::BorderType::Plain
-                    });
+                    .border_style(border_style)
+                    .title(block.title.clone());
 
-                let inner_area = block_widget.inner(chunk);
-                f.render_widget(block_widget, chunk);
+                f.render_widget(inner_block.clone(), *chunk);
 
-                if !block_data.collapsed {
-                    let content_to_display = if block_data.content.len() as u16 > inner_area.height {
-                        let start_index = block_data.scroll_offset as usize;
-                        let end_index = (start_index + inner_area.height as usize).min(block_data.content.len());
-                        block_data.content[start_index..end_index].to_vec()
-                    } else {
-                        block_data.content.clone()
-                    };
+                if !block.is_collapsed {
+                    let inner_area = inner_block.inner(*chunk);
+                    
+                    // Calculate visible lines based on scroll offset
+                    let start_index = block.scroll_offset;
+                    let end_index = (start_index + inner_area.height as usize).min(block.content.len());
+                    let visible_content: Vec<Line> = block.content.iter().skip(start_index).take(end_index - start_index).cloned().collect();
 
-                    let paragraph = Paragraph::new(content_to_display)
+                    let paragraph = Paragraph::new(visible_content)
                         .wrap(Wrap { trim: true });
                     f.render_widget(paragraph, inner_area);
                 }
