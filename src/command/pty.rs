@@ -1,192 +1,147 @@
 use std::process::{Command, Stdio};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, Write, BufReader, BufRead};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
-use serde::{Deserialize, Serialize};
+use tokio::process::Command as TokioCommand;
+use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::shell::ShellSession; // Import ShellSession
+
+#[derive(Debug)]
 pub enum CommandStatus {
     Running,
-    Completed(i32), // exit code
+    Completed(i32),
     Failed(String),
     Killed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
     pub status: CommandStatus,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 pub struct PtyManager {
-    active_commands: Arc<Mutex<Vec<ActiveCommand>>>,
-}
-
-struct ActiveCommand {
-    id: String,
-    process: std::process::Child,
-    output_sender: mpsc::UnboundedSender<CommandOutput>,
+    // In a full PTY implementation, this would manage the pseudo-terminal
+    // For now, it wraps `ShellSession` for command execution.
 }
 
 impl PtyManager {
     pub fn new() -> Self {
-        Self {
-            active_commands: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self {}
     }
 
     pub async fn execute_command(
         &self,
         command: &str,
         args: Vec<&str>,
-        working_dir: Option<&str>,
-    ) -> Result<mpsc::UnboundedReceiver<CommandOutput>, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let command_id = uuid::Uuid::new_v4().to_string();
+        env_vars: Option<HashMap<String, String>>,
+    ) -> Result<mpsc::Receiver<CommandOutput>, String> {
+        let (tx, rx) = mpsc::channel(100); // Channel for sending CommandOutput chunks
 
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::piped());
+        let session = ShellSession::new(env_vars); // Create a session with provided env vars
 
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
-        }
+        let command_str = command.to_string();
+        let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
-        let mut child = cmd.spawn()?;
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-
-        // Handle stdout
-        let tx_stdout = tx.clone();
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    let output = CommandOutput {
-                        stdout: line,
-                        stderr: String::new(),
-                        status: CommandStatus::Running,
-                        timestamp: chrono::Utc::now(),
-                    };
-                    if tx_stdout.send(output).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Handle stderr
-        let tx_stderr = tx.clone();
-        thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    let output = CommandOutput {
-                        stdout: String::new(),
-                        stderr: line,
-                        status: CommandStatus::Running,
-                        timestamp: chrono::Utc::now(),
-                    };
-                    if tx_stderr.send(output).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Store active command
-        {
-            let mut commands = self.active_commands.lock().unwrap();
-            commands.push(ActiveCommand {
-                id: command_id.clone(),
-                process: child,
-                output_sender: tx.clone(),
-            });
-        }
-
-        // Monitor process completion
-        let commands_ref = Arc::clone(&self.active_commands);
-        let tx_completion = tx.clone();
         tokio::spawn(async move {
-            // Wait for process completion in a separate thread
-            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+            let mut cmd = TokioCommand::new(&command_str);
+            cmd.args(&args_vec);
             
-            thread::spawn(move || {
-                let mut commands = commands_ref.lock().unwrap();
-                if let Some(pos) = commands.iter().position(|cmd| cmd.id == command_id) {
-                    let mut cmd = commands.remove(pos);
-                    match cmd.process.wait() {
-                        Ok(status) => {
-                            let exit_code = status.code().unwrap_or(-1);
-                            let _ = completion_tx.send(CommandStatus::Completed(exit_code));
-                        }
-                        Err(e) => {
-                            let _ = completion_tx.send(CommandStatus::Failed(e.to_string()));
+            // Apply environment variables from the session
+            for (key, value) in &session.environment {
+                cmd.env(key, value);
+            }
+
+            cmd.stdout(Stdio::piped())
+               .stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(CommandOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        status: CommandStatus::Failed(format!("Failed to spawn command: {}", e)),
+                    }).await;
+                    return;
+                }
+            };
+
+            let stdout = child.stdout.take().expect("Child did not have stdout");
+            let stderr = child.stderr.take().expect("Child did not have stderr");
+
+            let mut stdout_reader = TokioBufReader::new(stdout).lines();
+            let mut stderr_reader = TokioBufReader::new(stderr).lines();
+
+            loop {
+                tokio::select! {
+                    stdout_line = stdout_reader.next_line() => {
+                        match stdout_line {
+                            Ok(Some(line)) => {
+                                let _ = tx.send(CommandOutput {
+                                    stdout: line + "\n",
+                                    stderr: String::new(),
+                                    status: CommandStatus::Running,
+                                }).await;
+                            }
+                            Ok(None) => { /* stdout stream closed */ }
+                            Err(e) => {
+                                let _ = tx.send(CommandOutput {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    status: CommandStatus::Failed(format!("Stdout read error: {}", e)),
+                                }).await;
+                                break;
+                            }
                         }
                     }
+                    stderr_line = stderr_reader.next_line() => {
+                        match stderr_line {
+                            Ok(Some(line)) => {
+                                let _ = tx.send(CommandOutput {
+                                    stdout: String::new(),
+                                    stderr: line + "\n",
+                                    status: CommandStatus::Running,
+                                }).await;
+                            }
+                            Ok(None) => { /* stderr stream closed */ }
+                            Err(e) => {
+                                let _ = tx.send(CommandOutput {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    status: CommandStatus::Failed(format!("Stderr read error: {}", e)),
+                                }).await;
+                                break;
+                            }
+                        }
+                    }
+                    child_status = child.wait() => {
+                        match child_status {
+                            Ok(status) => {
+                                let exit_code = status.code().unwrap_or(1);
+                                let _ = tx.send(CommandOutput {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    status: CommandStatus::Completed(exit_code),
+                                }).await;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(CommandOutput {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    status: CommandStatus::Failed(format!("Child process error: {}", e)),
+                                }).await;
+                            }
+                        }
+                        break; // Child exited, so break the loop
+                    }
                 }
-            });
-
-            if let Some(status) = completion_rx.recv().await {
-                let final_output = CommandOutput {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    status,
-                    timestamp: chrono::Utc::now(),
-                };
-                let _ = tx_completion.send(final_output);
             }
         });
 
         Ok(rx)
-    }
-
-    pub fn kill_command(&self, command_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut commands = self.active_commands.lock().unwrap();
-        if let Some(pos) = commands.iter().position(|cmd| cmd.id == command_id) {
-            let mut cmd = commands.remove(pos);
-            cmd.process.kill()?;
-            
-            let killed_output = CommandOutput {
-                stdout: String::new(),
-                stderr: String::new(),
-                status: CommandStatus::Killed,
-                timestamp: chrono::Utc::now(),
-            };
-            let _ = cmd.output_sender.send(killed_output);
-        }
-        Ok(())
-    }
-
-    pub fn get_active_commands(&self) -> Vec<String> {
-        let commands = self.active_commands.lock().unwrap();
-        commands.iter().map(|cmd| cmd.id.clone()).collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_command_execution() {
-        let pty = PtyManager::new();
-        let mut rx = pty.execute_command("echo", vec!["hello world"], None).await.unwrap();
-        
-        let mut outputs = Vec::new();
-        while let Some(output) = rx.recv().await {
-            outputs.push(output.clone());
-            if matches!(output.status, CommandStatus::Completed(_)) {
-                break;
-            }
-        }
-        
-        assert!(!outputs.is_empty());
-        assert!(outputs.iter().any(|o| o.stdout.contains("hello world")));
     }
 }

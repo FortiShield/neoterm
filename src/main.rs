@@ -14,6 +14,7 @@ use ratatui::{
     Terminal,
 };
 use std::io; // Added for terminal setup
+use std::collections::HashMap; // Added for environment variables
 
 mod block;
 mod shell;
@@ -48,9 +49,9 @@ mod lpc; // Added missing module import
 mod mcq; // Added missing module import
 mod markdown_parser; // Added missing module import
 
-use block::{Block, BlockContent};
+use block::{Block, BlockContent}; // This Block is for Iced, not Ratatui
 use shell::ShellManager;
-use input::EnhancedTextInput;
+use input::EnhancedTextInput; // This is for Iced, not Ratatui
 use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage};
 use config::AppConfig;
 use crate::{
@@ -67,6 +68,9 @@ use crate::{
     performance::benchmarks::PerformanceBenchmarks,
 };
 
+// This NeoTerm struct and its Application impl are for the Iced GUI,
+// which seems to be a separate path from the Ratatui TUI.
+// For this request, we are focusing on the Ratatui TUI.
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
     blocks: Vec<Block>,
@@ -513,15 +517,26 @@ impl NeoTerm {
     }
 }
 
+// New AppMessage enum for communication between async tasks and the main TUI loop
 #[derive(Debug)]
-enum AppMode {
-    Normal,
-    CommandPalette,
-    AIChat,
-    WorkflowDebug,
-    Settings,
+enum AppMessage {
+    TerminalEvent(Event),
+    CommandOutputChunk {
+        block_id: String,
+        content: String,
+        is_stdout: bool,
+    },
+    CommandCompleted {
+        block_id: String,
+        exit_code: i32,
+    },
+    CommandFailed {
+        block_id: String,
+        error: String,
+    },
 }
 
+// The main application struct for the Ratatui TUI
 struct App {
     mode: AppMode,
     block_renderer: CollapsibleBlockRenderer,
@@ -534,12 +549,25 @@ struct App {
     sync_manager: Option<CloudSyncManager>,
     input_buffer: String,
     should_quit: bool,
-    config: AppConfig, // Added AppConfig to App struct
+    config: AppConfig,
+    // Channel for sending messages from async tasks to the main event loop
+    tx: mpsc::Sender<AppMessage>,
+    rx: mpsc::Receiver<AppMessage>,
+}
+
+#[derive(Debug)]
+enum AppMode {
+    Normal,
+    CommandPalette,
+    AIChat,
+    WorkflowDebug,
+    Settings,
 }
 
 impl App {
     fn new() -> Self {
-        let config = AppConfig::load().unwrap_or_default(); // Load config here
+        let config = AppConfig::load().unwrap_or_default();
+        let (tx, rx) = mpsc::channel(100); // Channel for async updates
         Self {
             mode: AppMode::Normal,
             block_renderer: CollapsibleBlockRenderer::new(),
@@ -552,7 +580,9 @@ impl App {
             sync_manager: None,
             input_buffer: String::new(),
             should_quit: false,
-            config, // Initialize config
+            config,
+            tx,
+            rx,
         }
     }
 
@@ -568,18 +598,33 @@ impl App {
         loop {
             terminal.draw(|f| self.ui(f))?;
 
-            // Process AI responses
+            // Process AI responses (if any are pending from previous turns)
             self.ai_sidebar.process_ai_response();
 
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match self.mode {
-                        AppMode::Normal => self.handle_normal_mode_input(key.code).await?,
-                        AppMode::CommandPalette => self.handle_command_palette_input(key.code).await?,
-                        AppMode::AIChat => self.handle_ai_chat_input(key.code).await?,
-                        AppMode::WorkflowDebug => self.handle_workflow_debug_input(key.code).await?,
-                        AppMode::Settings => self.handle_settings_input(key.code).await?,
+            tokio::select! {
+                // Prioritize terminal events
+                event_result = event::read() => {
+                    if let Ok(event) = event_result {
+                        if let Event::Key(key) = event {
+                            if key.kind == KeyEventKind::Press {
+                                match self.mode {
+                                    AppMode::Normal => self.handle_normal_mode_input(key.code).await?,
+                                    AppMode::CommandPalette => self.handle_command_palette_input(key.code).await?,
+                                    AppMode::AIChat => self.handle_ai_chat_input(key.code).await?,
+                                    AppMode::WorkflowDebug => self.handle_workflow_debug_input(key.code).await?,
+                                    AppMode::Settings => self.handle_settings_input(key.code).await?,
+                                }
+                            }
+                        }
                     }
+                },
+                // Handle messages from async tasks (e.g., command output)
+                Some(app_message) = self.rx.recv() => {
+                    self.handle_app_message(app_message).await?;
+                }
+                else => {
+                    // No events or messages, yield to prevent busy-looping
+                    tokio::task::yield_now().await;
                 }
             }
 
@@ -664,6 +709,32 @@ impl App {
         };
         
         f.render_widget(status_paragraph, status_area);
+    }
+
+    async fn handle_app_message(&mut self, message: AppMessage) -> Result<(), Box<dyn std::error::Error>> {
+        match message {
+            AppMessage::TerminalEvent(_) => { /* Handled by select! */ }
+            AppMessage::CommandOutputChunk { block_id, content, is_stdout } => {
+                if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
+                    block.add_line(content);
+                }
+            }
+            AppMessage::CommandCompleted { block_id, exit_code } => {
+                if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
+                    block.add_line(format!("[Command completed with exit code: {}]", exit_code));
+                    if exit_code != 0 {
+                        block.block_type = BlockType::Error; // Mark as error if non-zero exit
+                    }
+                }
+            }
+            AppMessage::CommandFailed { block_id, error } => {
+                if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
+                    block.add_line(format!("[Command failed: {}]", error));
+                    block.block_type = BlockType::Error;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn handle_normal_mode_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
@@ -763,18 +834,26 @@ impl App {
     }
 
     async fn execute_command(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let command = self.input_buffer.clone();
+        let command_input = self.input_buffer.clone();
         self.input_buffer.clear();
 
-        // Add command to blocks
-        let mut command_block = CollapsibleBlock::new(
-            format!("$ {}", command),
+        // Add command input block
+        let command_block = CollapsibleBlock::new(
+            format!("$ {}", command_input),
             BlockType::Command
         );
         self.block_renderer.add_block(command_block);
 
+        // Create an output block to stream into
+        let mut output_block = CollapsibleBlock::new(
+            "Output".to_string(),
+            BlockType::Output
+        );
+        let output_block_id = output_block.id.clone();
+        self.block_renderer.add_block(output_block);
+
         // Parse command
-        let parts: Vec<&str> = command.split_whitespace().collect();
+        let parts: Vec<&str> = command_input.split_whitespace().collect();
         if parts.is_empty() {
             return Ok(());
         }
@@ -788,37 +867,49 @@ impl App {
             .and_then(|name| self.config.env_profiles.profiles.get(name))
             .map(|profile| profile.variables.clone());
 
-        // Execute command via PTY
+        let tx_clone = self.tx.clone(); // Clone sender for the async task
+
+        // Execute command via PTY and stream output
         let mut output_receiver = self.pty_manager.execute_command(cmd, args, env_vars).await?;
         
-        let mut output_block = CollapsibleBlock::new(
-            "Output".to_string(),
-            BlockType::Output
-        );
-
-        // Process command output
         tokio::spawn(async move {
             while let Some(output) = output_receiver.recv().await {
                 match output.status {
                     CommandStatus::Running => {
                         if !output.stdout.is_empty() {
-                            // In a real implementation, you'd send this back to the main thread
-                            println!("STDOUT: {}", output.stdout);
+                            let _ = tx_clone.send(AppMessage::CommandOutputChunk {
+                                block_id: output_block_id.clone(),
+                                content: output.stdout,
+                                is_stdout: true,
+                            }).await;
                         }
                         if !output.stderr.is_empty() {
-                            println!("STDERR: {}", output.stderr);
+                            let _ = tx_clone.send(AppMessage::CommandOutputChunk {
+                                block_id: output_block_id.clone(),
+                                content: output.stderr,
+                                is_stdout: false,
+                            }).await;
                         }
                     }
                     CommandStatus::Completed(exit_code) => {
-                        println!("Command completed with exit code: {}", exit_code);
+                        let _ = tx_clone.send(AppMessage::CommandCompleted {
+                            block_id: output_block_id.clone(),
+                            exit_code,
+                        }).await;
                         break;
                     }
                     CommandStatus::Failed(error) => {
-                        println!("Command failed: {}", error);
+                        let _ = tx_clone.send(AppMessage::CommandFailed {
+                            block_id: output_block_id.clone(),
+                            error,
+                        }).await;
                         break;
                     }
                     CommandStatus::Killed => {
-                        println!("Command was killed");
+                        let _ = tx_clone.send(AppMessage::CommandFailed {
+                            block_id: output_block_id.clone(),
+                            error: "Command was killed".to_string(),
+                        }).await;
                         break;
                     }
                 }
@@ -910,7 +1001,7 @@ impl App {
         welcome_block.add_line("Press 'F1' to run performance benchmarks.".to_string());
         
         let mut sample_command = CollapsibleBlock::new(
-            "$ ls -la".to_string(),
+            "$ echo 'Hello, NeoPilot!'".to_string(),
             BlockType::Command
         );
         
@@ -918,10 +1009,8 @@ impl App {
             "Output".to_string(),
             BlockType::Output
         );
-        sample_output.add_line("total 48".to_string());
-        sample_output.add_line("drwxr-xr-x  8 user user 4096 Jan 15 10:30 .".to_string());
-        sample_output.add_line("drwxr-xr-x  3 user user 4096 Jan 15 10:25 ..".to_string());
-        sample_output.add_line("-rw-r--r--  1 user user 1234 Jan 15 10:30 README.md".to_string());
+        sample_output.add_line("Hello, NeoPilot!".to_string());
+        sample_output.add_line("[Command completed with exit code: 0]".to_string());
         
         self.block_renderer.add_block(welcome_block);
         self.block_renderer.add_block(sample_command);

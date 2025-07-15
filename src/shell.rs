@@ -1,165 +1,103 @@
-use std::process::Stdio;
-use tokio::process::Command;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::process::{Command, Stdio};
+use std::io::{self, Write, BufReader, BufRead};
+use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use uuid::Uuid;
+use tokio::sync::mpsc;
+use tokio::process::Command as TokioCommand;
+use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 
-#[derive(Debug, Clone)]
 pub struct ShellManager {
-    active_sessions: HashMap<Uuid, ShellSession>,
-    default_shell: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShellSession {
-    id: Uuid,
-    working_dir: std::path::PathBuf,
-    environment: HashMap<String, String>, // Environment variables for this session
+    // In a real application, this might manage multiple shell sessions
 }
 
 impl ShellManager {
     pub fn new() -> Self {
-        Self {
-            active_sessions: HashMap::new(),
-            default_shell: Self::detect_shell(),
-        }
+        Self {}
     }
 
+    // This function is for the Iced GUI path, which is not the primary focus for this request.
     pub async fn execute_command(&self, command: String, env_vars: Option<HashMap<String, String>>) -> (String, i32) {
-        let mut cmd = Command::new(&self.default_shell);
-        cmd.arg("-c")
-           .arg(&command)
-           .stdout(Stdio::piped())
-           .stderr(Stdio::piped());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&command);
 
-        // Apply environment variables if provided
         if let Some(vars) = env_vars {
-            cmd.envs(vars);
-        }
-
-        match cmd.spawn() {
-            Ok(mut child) => {
-                let stdout = child.stdout.take().unwrap();
-                let stderr = child.stderr.take().unwrap();
-
-                let stdout_reader = BufReader::new(stdout);
-                let stderr_reader = BufReader::new(stderr);
-
-                let mut output = String::new();
-                let mut error_output = String::new();
-
-                // Read stdout
-                let mut stdout_lines = stdout_reader.lines();
-                while let Ok(Some(line)) = stdout_lines.next_line().await {
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-
-                // Read stderr
-                let mut stderr_lines = stderr_reader.lines();
-                while let Ok(Some(line)) = stderr_lines.next_line().await {
-                    error_output.push_str(&line);
-                    error_output.push('\n');
-                }
-
-                let exit_status = child.wait().await.unwrap_or_else(|_| {
-                    std::process::ExitStatus::from_raw(1)
-                });
-
-                let exit_code = exit_status.code().unwrap_or(1);
-                
-                let combined_output = if !error_output.is_empty() {
-                    format!("{}\n{}", output, error_output)
-                } else {
-                    output
-                };
-
-                (combined_output, exit_code)
-            }
-            Err(e) => {
-                (format!("Failed to execute command: {}", e), 1)
+            for (key, value) in vars {
+                cmd.env(key, value);
             }
         }
+
+        let output = cmd.output().expect("Failed to execute command");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(1);
+
+        (format!("{}{}", stdout, stderr), exit_code)
     }
 
-    pub async fn execute_interactive_command(&mut self, command: String, env_vars: Option<HashMap<String, String>>) -> tokio::sync::mpsc::Receiver<String> {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-        
-        let shell = self.default_shell.clone();
-        tokio::spawn(async move {
-            let mut cmd = Command::new(shell);
-            cmd.arg("-c")
-               .arg(command)
-               .stdout(Stdio::piped())
-               .stderr(Stdio::piped());
-
-            // Apply environment variables if provided
-            if let Some(vars) = env_vars {
-                cmd.envs(vars);
-            }
-
-            if let Ok(mut child) = cmd.spawn() {
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                
-                let _ = child.wait().await;
-            }
-        });
-
-        rx
-    }
-
-    fn detect_shell() -> String {
-        std::env::var("SHELL")
-            .unwrap_or_else(|_| {
-                if cfg!(windows) {
-                    "cmd".to_string()
-                } else {
-                    "/bin/sh".to_string()
-                }
-            })
-    }
-
-    pub fn create_session(&mut self, initial_env: Option<HashMap<String, String>>) -> Uuid {
-        let mut environment = std::env::vars().collect::<HashMap<String, String>>();
-        if let Some(initial_vars) = initial_env {
-            environment.extend(initial_vars);
-        }
-
-        let session = ShellSession {
-            id: Uuid::new_v4(),
-            working_dir: std::env::current_dir().unwrap_or_default(),
-            environment,
-        };
-        
-        let id = session.id;
-        self.active_sessions.insert(id, session);
-        id
-    }
-
-    pub fn get_session(&self, id: &Uuid) -> Option<&ShellSession> {
-        self.active_sessions.get(id)
+    // This function is for the Ratatui TUI path, used by PtyManager.
+    pub fn create_session(&self, initial_env: Option<HashMap<String, String>>) -> ShellSession {
+        ShellSession::new(initial_env)
     }
 }
 
+pub struct ShellSession {
+    // This might hold a PTY master, or just manage environment for non-interactive commands
+    pub environment: HashMap<String, String>,
+}
+
 impl ShellSession {
-    pub fn set_working_dir(&mut self, path: std::path::PathBuf) {
-        self.working_dir = path;
+    pub fn new(initial_env: Option<HashMap<String, String>>) -> Self {
+        let mut environment = std::env::vars().collect::<HashMap<String, String>>();
+        if let Some(env_vars) = initial_env {
+            environment.extend(env_vars);
+        }
+        Self { environment }
     }
 
-    pub fn set_env_var(&mut self, key: String, value: String) {
-        self.environment.insert(key, value);
-    }
+    // This method is now primarily used by PtyManager for interactive/streaming commands
+    pub async fn execute_command_stream(
+        &self,
+        command: &str,
+        args: &[&str],
+        tx: mpsc::Sender<String>, // Sender for streaming output
+    ) -> Result<i32, String> {
+        let mut cmd = TokioCommand::new(command);
+        cmd.args(args);
+        
+        // Apply environment variables from the session
+        for (key, value) in &self.environment {
+            cmd.env(key, value);
+        }
 
-    pub fn get_working_dir(&self) -> &std::path::PathBuf {
-        &self.working_dir
+        cmd.stdout(Stdio::piped())
+           .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {}", e))?;
+
+        let stdout = child.stdout.take().ok_or("Child did not have stdout")?;
+        let stderr = child.stderr.take().ok_or("Child did not have stderr")?;
+
+        let mut stdout_reader = TokioBufReader::new(stdout).lines();
+        let mut stderr_reader = TokioBufReader::new(stderr).lines();
+
+        loop {
+            tokio::select! {
+                Ok(Some(line)) = stdout_reader.next_line() => {
+                    tx.send(line).await.map_err(|e| format!("Failed to send stdout: {}", e))?;
+                }
+                Ok(Some(line)) = stderr_reader.next_line() => {
+                    tx.send(format!("ERROR: {}", line)).await.map_err(|e| format!("Failed to send stderr: {}", e))?;
+                }
+                status = child.wait() => {
+                    let exit_code = status.map_err(|e| format!("Failed to wait for child: {}", e))?.code().unwrap_or(1);
+                    return Ok(exit_code);
+                }
+                else => break, // Both streams closed and child not yet exited
+            }
+        }
+        
+        // In case streams close before child exits, wait for child
+        let exit_code = child.wait().await.map_err(|e| format!("Failed to wait for child: {}", e))?.code().unwrap_or(1);
+        Ok(exit_code)
     }
 }

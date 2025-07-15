@@ -21,7 +21,7 @@ pub struct CollapsibleBlock {
     pub metadata: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)] // Added PartialEq for comparison
 pub enum BlockType {
     Command,
     Output,
@@ -114,6 +114,10 @@ impl CollapsibleBlockRenderer {
     pub fn add_block(&mut self, block: CollapsibleBlock) {
         self.blocks.push(block);
         self.selected_index = self.blocks.len().saturating_sub(1);
+        // Ensure scroll_offset keeps the new block in view if it's the last one
+        // This logic might need refinement based on actual viewport height
+        // For now, simply set scroll_offset to show the last block
+        self.scroll_offset = self.blocks.len().saturating_sub(1);
     }
 
     pub fn toggle_selected_block(&mut self) {
@@ -134,59 +138,71 @@ impl CollapsibleBlockRenderer {
     pub fn move_selection_down(&mut self) {
         if self.selected_index < self.blocks.len().saturating_sub(1) {
             self.selected_index += 1;
+            // Adjust scroll_offset to keep selected item in view
+            // This needs to consider the actual height of the rendered blocks
+            // For simplicity, let's assume a fixed block height for now or adjust based on visible area
+            // A more robust solution would calculate visible lines/blocks
+            let visible_height = 10; // Placeholder, should be derived from actual render area
+            if self.selected_index >= self.scroll_offset + visible_height {
+                self.scroll_offset = self.selected_index - visible_height + 1;
+            }
         }
     }
 
     pub fn render<B: Backend>(&mut self, f: &mut Frame<B>, area: Rect) {
-        let visible_height = area.height as usize;
-        let total_blocks = self.blocks.len();
+        let mut list_items: Vec<ListItem> = Vec::new();
+        let mut current_height = 0;
+        let mut block_start_indices = Vec::new(); // Store (block_index, start_line_in_list_items)
 
-        // Adjust scroll offset to keep selected item visible
-        if self.selected_index >= self.scroll_offset + visible_height {
-            self.scroll_offset = self.selected_index.saturating_sub(visible_height - 1);
-        } else if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
+        for (i, block) in self.blocks.iter().enumerate() {
+            block_start_indices.push((i, list_items.len()));
+
+            let is_selected = i == self.selected_index;
+            let style = if is_selected {
+                block.get_style().add_modifier(Modifier::REVERSED)
+            } else {
+                block.get_style()
+            };
+
+            let title_line = Line::from(vec![
+                Span::styled(block.get_title_with_indicator(), style)
+            ]);
+            list_items.push(ListItem::new(title_line));
+            current_height += 1;
+            
+            if !block.is_collapsed {
+                for content_line in &block.content {
+                    list_items.push(ListItem::new(Line::from(vec![
+                        Span::styled(format!("  {}", content_line), block.get_style())
+                    ])));
+                    current_height += 1;
+                }
+            }
         }
 
-        let visible_blocks: Vec<ListItem> = self.blocks
-            .iter()
-            .enumerate()
-            .skip(self.scroll_offset)
-            .take(visible_height)
-            .map(|(i, block)| {
-                let is_selected = i == self.selected_index;
-                let style = if is_selected {
-                    block.get_style().add_modifier(Modifier::REVERSED)
-                } else {
-                    block.get_style()
-                };
+        // Calculate the actual scroll offset based on selected_index and visible area
+        let mut effective_scroll_offset = 0;
+        if let Some((_, start_line)) = block_start_indices.iter().find(|(idx, _)| *idx == self.selected_index) {
+            let visible_lines_in_area = area.height as usize;
+            if *start_line >= effective_scroll_offset + visible_lines_in_area {
+                effective_scroll_offset = start_line.saturating_sub(visible_lines_in_area - 1);
+            } else if *start_line < effective_scroll_offset {
+                effective_scroll_offset = *start_line;
+            }
+        }
+        self.scroll_offset = effective_scroll_offset;
 
-                let title_line = Line::from(vec![
-                    Span::styled(block.get_title_with_indicator(), style)
-                ]);
 
-                let mut lines = vec![title_line];
-                
-                if !block.is_collapsed {
-                    for content_line in &block.content {
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("  {}", content_line), block.get_style())
-                        ]));
-                    }
-                }
-
-                ListItem::new(lines)
-            })
-            .collect();
-
-        let list = List::new(visible_blocks)
+        let list = List::new(list_items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Blocks ({}/{})", self.selected_index + 1, total_blocks))
-            );
+                    .title(format!("Blocks ({}/{})", self.selected_index + 1, self.blocks.len()))
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol(">> ");
 
-        f.render_widget(list, area);
+        f.render_stateful_widget(list, area, &mut ratatui::widgets::ListState::new(Some(self.scroll_offset)));
     }
 
     pub fn collapse_all(&mut self) {
