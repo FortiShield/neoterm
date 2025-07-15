@@ -1,0 +1,139 @@
+[package]
+name = "neoterm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core GUI framework
+iced = { version = "0.13", features = ["tokio", "image", "debug", "advanced"] }
+iced_graphics = "0.13"
+iced_winit = "0.13"
+iced_widget = "0.13"
+iced_futures = "0.13"
+crossterm = "0.27"
+ratatui = "0.26"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] } # For async operations
+
+# UUID generation
+uuid = { version = "1.8", features = ["v4", "fast-rng", "macro-diagnostics"] }
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Configuration and serialization
+serde = { version = "1.0", features = ["derive"] } # For serialization/deserialization
+serde_json = "1.0"
+toml = "0.8"
+serde_yaml = "0.9" # For YAML config/themes
+
+# Configuration management
+config = "0.13"
+directories = "5.0" # For config paths
+
+# Error handling
+anyhow = "1.0" # For error handling
+
+# Fuzzy matching and search
+fuzzy-matcher = "0.3"
+skim = "0.10"
+
+# Regular expressions
+regex = "1.10"
+
+# URL parsing
+url = "2.5"
+
+# HTTP client for importing workflows and GraphQL
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# File system operations
+notify = "6.1.1" # For file system watching
+walkdir = "2.0"
+inotify = "0.10"
+notify-debouncer-mini = "0.4"
+fuser = "0.14" # Added for Virtual FS - requires FUSE libraries on macOS
+libc = "0.2"
+ndarray = "0.15"
+futures-util = "0.3"
+winit = "0.28"
+
+# Markdown parsing
+pulldown-cmark = "0.9"
+
+# Syntax highlighting
+syntect = "5.0"
+
+# Tree-sitter for syntax trees
+tree-sitter = "0.20"
+tree-sitter-bash = "0.20"
+
+# Terminal/PTY support
+portable-pty = "0.8"
+
+# Logging
+log = "0.4" # For logging
+env_logger = "0.11" # For logging setup
+tui-textarea = "0.4"
+
+# GPU acceleration (optional)
+wgpu = "26.0"
+cosmic-text = "0.12"
+
+# WebSocket support for collaboration
+tokio-tungstenite = "0.20"
+
+# WASM runtime for plugins
+wasmtime = "14.0"
+wasmer = "4.2" # Added for Agent Mode Eval
+deno_core = "0.260" # Added for Agent Mode Eval
+
+# Image processing
+image = "0.24"
+
+# Clipboard support
+arboard = "3.0"
+
+# Performance profiling
+pprof = { version = "0.12", features = ["flamegraph"] }
+
+# Color manipulation
+palette = "0.7"
+
+# File dialog
+rfd = "0.12"
+
+# Git repository support
+git2 = "0.18"
+
+# Virtual File System (FUSE)
+# tokio-fuse = "0.1" # For async FUSE operations
+
+# ONNX Runtime for Natural Language Processing
+ort = { version = "2.0.0-rc.10", features = ["ndarray"] } # Added for Natural Language
+
+# Sentry for crash reporting in Rust
+sentry = { version = "0.41", features = ["backtrace", "contexts", "panic"] } # Updated to latest version
+
+# Web server for WASM serving
+warp = "0.3"
+hyper = { version = "0.14", features = ["full"] }
+bytes = "1"
+futures = "0.3"
+
+lazy_static = "1.4"
+rand = "0.8"
+async-trait = "0.1"
+base64 = "0.22"
+async-recursion = "1.1"
+once_cell = "1.19"
+semver = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,17 @@
+name: "Find Large Files"
+description: "Find files larger than specified size in a directory"
+command: "find {{directory}} -type f -size +{{size}} -exec ls -lh {} \\; | awk '{ print $9 \": \" $5 }' | sort -k2 -hr"
+tags: ["filesystem", "search", "disk-usage"]
+author: "System Admin"
+shells: ["bash", "zsh"]
+arguments:
+  - name: directory
+    description: "Directory to search in"
+    default_value: "."
+    arg_type: path
+    required: true
+  - name: size
+    description: "Minimum file size (e.g., 100M, 1G)"
+    default_value: "100M"
+    arg_type: string
+    required: true
