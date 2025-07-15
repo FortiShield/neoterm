@@ -46,14 +46,16 @@
 - [ ] Allow opt-out or full local-only mode
 - [ ] Mask sensitive directory/file names
 
-📁 Final Directory Summary
+# 📁 AI Module Directory Structure
 
+```plaintext
 src/ai/
-├── mod.rs
-├── assistant.rs         # `suggest()`, `fix()`, `explain()`, etc.
+├── mod.rs               # Top-level module file
+├── assistant.rs         # suggest(), fix(), explain(), etc.
 ├── prompts.rs           # Static + dynamic prompt builders
 ├── context.rs           # Collect env, cwd, history
-├── providers/
-│   ├── openai.rs
-│   ├── ollama.rs
-│   └── anthropic.rs
+├── providers/           # Abstraction over AI backends
+│   ├── openai.rs        # OpenAI GPT API support
+│   ├── ollama.rs        # Local llama.cpp/Ollama support
+│   └── anthropic.rs     # Optional Claude API support
+
