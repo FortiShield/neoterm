@@ -10,6 +10,9 @@ pub struct UserPreferences {
     pub performance: PerformancePreferences,
     pub privacy: PrivacyPreferences,
     pub environment_profiles: EnvironmentProfiles,
+    pub theme: String,
+    pub font_size: u16,
+    pub shell: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +229,9 @@ impl Default for UserPreferences {
             performance: PerformancePreferences::default(),
             privacy: PrivacyPreferences::default(),
             environment_profiles: EnvironmentProfiles::default(),
+            theme: "default".to_string(),
+            font_size: 12,
+            shell: "bash".to_string(),
         }
     }
 }

@@ -12,6 +12,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
     Terminal,
+    text::Line, // Import Line for styled text
 };
 use std::io; // Added for terminal setup
 use std::collections::HashMap; // Added for environment variables
@@ -523,8 +524,7 @@ enum AppMessage {
     TerminalEvent(Event),
     CommandOutputChunk {
         block_id: String,
-        content: String,
-        is_stdout: bool,
+        content: Vec<Line>, // Changed to Vec<Line> for styled output
     },
     CommandCompleted {
         block_id: String,
@@ -714,14 +714,16 @@ impl App {
     async fn handle_app_message(&mut self, message: AppMessage) -> Result<(), Box<dyn std::error::Error>> {
         match message {
             AppMessage::TerminalEvent(_) => { /* Handled by select! */ }
-            AppMessage::CommandOutputChunk { block_id, content, is_stdout } => {
+            AppMessage::CommandOutputChunk { block_id, content } => { // content is now Vec<Line>
                 if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
-                    block.add_line(content);
+                    for line in content {
+                        block.add_line(line); // Pass Line directly
+                    }
                 }
             }
             AppMessage::CommandCompleted { block_id, exit_code } => {
                 if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
-                    block.add_line(format!("[Command completed with exit code: {}]", exit_code));
+                    block.add_line(Line::from(format!("[Command completed with exit code: {}]", exit_code))); // Convert string to Line
                     if exit_code != 0 {
                         block.block_type = BlockType::Error; // Mark as error if non-zero exit
                     }
@@ -729,7 +731,7 @@ impl App {
             }
             AppMessage::CommandFailed { block_id, error } => {
                 if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
-                    block.add_line(format!("[Command failed: {}]", error));
+                    block.add_line(Line::from(format!("[Command failed: {}]", error))); // Convert string to Line
                     block.block_type = BlockType::Error;
                 }
             }
@@ -777,7 +779,7 @@ impl App {
                     "Performance Benchmarks".to_string(),
                     BlockType::Info
                 );
-                benchmark_block.add_line(benchmarks.get_performance_summary());
+                benchmark_block.add_line(Line::from(benchmarks.get_performance_summary())); // Convert string to Line
                 self.block_renderer.add_block(benchmark_block);
             }
             _ => {}
@@ -828,8 +830,15 @@ impl App {
         Ok(())
     }
 
-    async fn handle_settings_input(&mut self, _key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_settings_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
         // Settings input handling would go here
+        // For now, just allow escaping back to normal mode
+        match key {
+            KeyCode::Esc => {
+                self.mode = AppMode::Normal;
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -839,14 +848,14 @@ impl App {
 
         // Add command input block
         let command_block = CollapsibleBlock::new(
-            format!("$ {}", command_input),
+            Line::from(format!("$ {}", command_input)), // Convert string to Line
             BlockType::Command
         );
         self.block_renderer.add_block(command_block);
 
         // Create an output block to stream into
-        let mut output_block = CollapsibleBlock::new(
-            "Output".to_string(),
+        let output_block = CollapsibleBlock::new(
+            Line::from("Output"), // Convert string to Line
             BlockType::Output
         );
         let output_block_id = output_block.id.clone();
@@ -876,18 +885,17 @@ impl App {
             while let Some(output) = output_receiver.recv().await {
                 match output.status {
                     CommandStatus::Running => {
+                        // Send both stdout and stderr as styled lines
                         if !output.stdout.is_empty() {
                             let _ = tx_clone.send(AppMessage::CommandOutputChunk {
                                 block_id: output_block_id.clone(),
-                                content: output.stdout,
-                                is_stdout: true,
+                                content: output.stdout, // Already Vec<Line>
                             }).await;
                         }
                         if !output.stderr.is_empty() {
                             let _ = tx_clone.send(AppMessage::CommandOutputChunk {
                                 block_id: output_block_id.clone(),
-                                content: output.stderr,
-                                is_stdout: false,
+                                content: output.stderr, // Already Vec<Line>
                             }).await;
                         }
                     }
@@ -927,10 +935,10 @@ impl App {
             CommandAction::NewTab => {
                 // Implement new tab functionality
                 let mut info_block = CollapsibleBlock::new(
-                    "New Tab".to_string(),
+                    Line::from("New Tab"), // Convert string to Line
                     BlockType::Info
                 );
-                info_block.add_line("New tab functionality would be implemented here".to_string());
+                info_block.add_line(Line::from("New tab functionality would be implemented here")); // Convert string to Line
                 self.block_renderer.add_block(info_block);
             }
             CommandAction::CloseTab => {
@@ -951,7 +959,11 @@ impl App {
             CommandAction::AIExplain => {
                 // Get current block content and ask AI to explain
                 if let Some(selected_block) = self.block_renderer.blocks.get(self.block_renderer.selected_index) {
-                    let context = format!("Please explain this terminal output: {}", selected_block.content.join("\n"));
+                    // Convert Vec<Line> to a single string for context
+                    let context_lines: Vec<String> = selected_block.content.iter()
+                        .map(|line| line.spans.iter().map(|span| span.content.to_string()).collect::<String>())
+                        .collect();
+                    let context = format!("Please explain this terminal output: {}", context_lines.join("\n"));
                     self.ai_sidebar.inject_terminal_context(&context);
                     self.ai_sidebar.toggle();
                     self.mode = AppMode::AIChat;
@@ -962,24 +974,24 @@ impl App {
             }
             CommandAction::ShowHelp => {
                 let mut help_block = CollapsibleBlock::new(
-                    "Help".to_string(),
+                    Line::from("Help"), // Convert string to Line
                     BlockType::Info
                 );
-                help_block.add_line("Keybindings:".to_string());
-                help_block.add_line("  q - Quit".to_string());
-                help_block.add_line("  Space - Toggle block collapse".to_string());
-                help_block.add_line("  Up/Down - Navigate blocks".to_string());
-                help_block.add_line("  p - Open command palette".to_string());
-                help_block.add_line("  a - Toggle AI sidebar".to_string());
-                help_block.add_line("  F1 - Run performance benchmarks".to_string());
+                help_block.add_line(Line::from("Keybindings:")); // Convert string to Line
+                help_block.add_line(Line::from("  q - Quit")); // Convert string to Line
+                help_block.add_line(Line::from("  Space - Toggle block collapse")); // Convert string to Line
+                help_block.add_line(Line::from("  Up/Down - Navigate blocks")); // Convert string to Line
+                help_block.add_line(Line::from("  p - Open command palette")); // Convert string to Line
+                help_block.add_line(Line::from("  a - Toggle AI sidebar")); // Convert string to Line
+                help_block.add_line(Line::from("  F1 - Run performance benchmarks")); // Convert string to Line
                 self.block_renderer.add_block(help_block);
             }
             CommandAction::RunWorkflow(workflow_name) => {
                 let mut workflow_block = CollapsibleBlock::new(
-                    format!("Running workflow: {}", workflow_name),
+                    Line::from(format!("Running workflow: {}", workflow_name)), // Convert string to Line
                     BlockType::Info
                 );
-                workflow_block.add_line("Workflow execution would be implemented here".to_string());
+                workflow_block.add_line(Line::from("Workflow execution would be implemented here")); // Convert string to Line
                 self.block_renderer.add_block(workflow_block);
             }
             CommandAction::Custom(command) => {
@@ -991,26 +1003,34 @@ impl App {
     }
 
     fn add_sample_blocks(&mut self) {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::Span;
+
         let mut welcome_block = CollapsibleBlock::new(
-            "Welcome to NeoPilot Terminal".to_string(),
+            Line::from("Welcome to NeoPilot Terminal"),
             BlockType::Info
         );
-        welcome_block.add_line("This is a next-generation terminal with AI assistance.".to_string());
-        welcome_block.add_line("Press 'p' to open the command palette.".to_string());
-        welcome_block.add_line("Press 'a' to toggle the AI sidebar.".to_string());
-        welcome_block.add_line("Press 'F1' to run performance benchmarks.".to_string());
+        welcome_block.add_line(Line::from("This is a next-generation terminal with AI assistance."));
+        welcome_block.add_line(Line::from("Press 'p' to open the command palette."));
+        welcome_block.add_line(Line::from("Press 'a' to toggle the AI sidebar."));
+        welcome_block.add_line(Line::from("Press 'F1' to run performance benchmarks."));
         
         let mut sample_command = CollapsibleBlock::new(
-            "$ echo 'Hello, NeoPilot!'".to_string(),
+            Line::from(vec![
+                Span::raw("$ "),
+                Span::styled("echo 'Hello, NeoPilot!'", Style::default().fg(Color::Green)),
+            ]),
             BlockType::Command
         );
         
         let mut sample_output = CollapsibleBlock::new(
-            "Output".to_string(),
+            Line::from("Output"),
             BlockType::Output
         );
-        sample_output.add_line("Hello, NeoPilot!".to_string());
-        sample_output.add_line("[Command completed with exit code: 0]".to_string());
+        sample_output.add_line(Line::from(vec![
+            Span::styled("Hello, NeoPilot!", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]));
+        sample_output.add_line(Line::from("[Command completed with exit code: 0]"));
         
         self.block_renderer.add_block(welcome_block);
         self.block_renderer.add_block(sample_command);

@@ -5,8 +5,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
 pub struct ShellManager {
-    // In a real application, you might manage multiple shell sessions
-    // For now, we'll keep it simple.
+    // Potentially store shell path, etc.
 }
 
 impl ShellManager {
@@ -17,26 +16,21 @@ impl ShellManager {
     /// Executes a command and returns its output and exit code.
     /// This is a simplified version for the Iced GUI.
     pub async fn execute_command(&self, command: String, env_vars: Option<HashMap<String, String>>) -> (String, i32) {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-        let mut cmd = Command::new(&shell);
+        let mut cmd = Command::new("sh"); // Or powershell.exe on Windows, etc.
         cmd.arg("-c").arg(&command);
 
-        if let Some(vars) = env_vars {
-            cmd.envs(vars);
+        if let Some(env) = env_vars {
+            cmd.envs(env);
         }
 
-        let output = cmd.output().await;
-
-        match output {
+        match cmd.output().await {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(1);
+                let exit_code = output.status.code().unwrap_or(-1);
                 (format!("{}\n{}", stdout, stderr), exit_code)
             }
-            Err(e) => {
-                (format!("Failed to execute command: {}", e), 1)
-            }
+            Err(e) => (format!("Failed to execute command: {}", e), -1),
         }
     }
 
