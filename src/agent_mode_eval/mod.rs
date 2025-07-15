@@ -97,7 +97,6 @@ impl AgentMode {
         
         self.current_conversation = Some(conversation_id);
         
-        // Add system message if configured
         if let Some(system_prompt) = &self.config.ai_config.system_prompt {
             self.conversation_manager.add_message(
                 conversation_id,
@@ -119,7 +118,6 @@ impl AgentMode {
         let conversation_id = self.current_conversation
             .ok_or("No active conversation")?;
 
-        // Add user message to conversation
         let user_message = Message {
             id: Uuid::new_v4(),
             role: MessageRole::User,
@@ -131,17 +129,14 @@ impl AgentMode {
 
         self.conversation_manager.add_message(conversation_id, user_message)?;
 
-        // Get conversation history
         let messages = self.conversation_manager.get_messages(conversation_id)?;
         
-        // Get available tools if enabled
         let tools = if self.config.tools_enabled {
             Some(self.tool_manager.get_available_tools())
         } else {
             None
         };
 
-        // Send to AI client
         let response_stream = self.ai_client.send_message(messages, tools).await?;
 
         Ok(response_stream)
@@ -254,8 +249,6 @@ pub struct ConversationStats {
 }
 
 pub fn init() {
-    // Initialize the agent mode system
-    // This can be used for any global setup needed
     tracing::info!("Agent mode system initialized");
 }
 
@@ -275,28 +268,32 @@ mod tests {
         let config = AgentConfig::default();
         let mut agent = AgentMode::new(config).unwrap();
         
-        // Start conversation
         let conversation_id = agent.start_conversation().unwrap();
         assert_eq!(agent.current_conversation, Some(conversation_id));
         
-        // Check stats
         let stats = agent.get_conversation_stats().unwrap();
-        assert!(stats.message_count >= 0); // May have system message
+        assert!(stats.message_count >= 0);
         
-        // Clear conversation
         agent.clear_conversation().unwrap();
     }
 
     #[test]
     fn test_model_switching() {
-        let config = AgentConfig::default();
-        let mut agent = AgentMode::new(config).unwrap();
+        let config = AiConfig {
+            provider: AiProvider::OpenAI,
+            model: "gpt-4o".to_string(),
+            api_key: Some("test-key".to_string()),
+            base_url: None,
+            temperature: 0.7,
+            max_tokens: None,
+            system_prompt: None,
+            tools_enabled: true,
+        };
+        let mut agent = AgentMode::new(AgentConfig { ai_config: config, ..Default::default() }).unwrap();
         
-        // Test valid model switch
         let result = agent.switch_model("gpt-4".to_string());
         assert!(result.is_ok());
         
-        // Test invalid model switch
         let result = agent.switch_model("invalid-model".to_string());
         assert!(result.is_err());
     }
@@ -308,7 +305,6 @@ mod tests {
         
         let mut agent = AgentMode::new(config).unwrap();
         
-        // Test provider switch
         let result = agent.switch_provider(AiProvider::Claude, "claude-4-sonnet-20250514".to_string());
         assert!(result.is_ok());
         

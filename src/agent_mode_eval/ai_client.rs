@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use futures_util::StreamExt; // For consuming reqwest response stream
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AiProvider {
@@ -85,7 +86,6 @@ impl AiClient {
 
         let mut available_models = HashMap::new();
         
-        // OpenAI Models
         available_models.insert(AiProvider::OpenAI, vec![
             "gpt-4o".to_string(),
             "gpt-4".to_string(),
@@ -97,7 +97,6 @@ impl AiClient {
             "o3-mini".to_string(),
         ]);
 
-        // Claude Models
         available_models.insert(AiProvider::Claude, vec![
             "claude-4-sonnet-20250514".to_string(),
             "claude-4-opus-20250514".to_string(),
@@ -106,7 +105,6 @@ impl AiClient {
             "claude-3-7-haiku-20241022".to_string(),
         ]);
 
-        // Gemini Models
         available_models.insert(AiProvider::Gemini, vec![
             "gemini-2.0-flash-exp".to_string(),
             "gemini-2.0-pro-exp".to_string(),
@@ -114,7 +112,6 @@ impl AiClient {
             "gemini-1.5-flash".to_string(),
         ]);
 
-        // Ollama Models [^3]
         available_models.insert(AiProvider::Ollama, vec![
             "llama3.2".to_string(),
             "llama3.1".to_string(),
@@ -123,11 +120,10 @@ impl AiClient {
             "phi3".to_string(),
             "qwen2.5".to_string(),
             "deepseek-coder".to_string(),
-            "llava".to_string(), // Added for multimodal support [^3]
-            "nomic-embed-text".to_string(), // Added for embeddings [^3]
+            "llava".to_string(),
+            "nomic-embed-text".to_string(),
         ]);
 
-        // Groq Models [^2]
         available_models.insert(AiProvider::Groq, vec![
             "llama-3.1-70b-versatile".to_string(),
             "llama-3.1-8b-instant".to_string(),
@@ -216,7 +212,6 @@ impl AiClient {
             match response {
                 Ok(resp) => {
                     if let Ok(text) = resp.text().await {
-                        // Parse SSE stream
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
@@ -300,7 +295,6 @@ impl AiClient {
             match response {
                 Ok(resp) => {
                     if let Ok(text) = resp.text().await {
-                        // Parse Claude SSE stream
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
@@ -359,7 +353,6 @@ impl AiClient {
             match response {
                 Ok(resp) => {
                     if let Ok(text) = resp.text().await {
-                        // Parse Gemini streaming response
                         for line in text.lines() {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
                                 if let Some(candidates) = json["candidates"].as_array() {
@@ -389,11 +382,10 @@ impl AiClient {
     async fn send_ollama_message(
         &self,
         messages: Vec<Message>,
-        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>, // Ollama's tool support varies, keeping it simple for now
+        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
     ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
         let (tx, rx) = mpsc::channel(100);
         
-        // Default Ollama base URL [^3]
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("http://localhost:11434");
 
@@ -403,12 +395,12 @@ impl AiClient {
             "stream": true,
             "options": {
                 "temperature": self.config.temperature,
-                "num_predict": self.config.max_tokens.unwrap_or(4096) // Max tokens for Ollama
+                "num_predict": self.config.max_tokens.unwrap_or(4096)
             }
         });
 
         let client = self.http_client.clone();
-        let url = format!("{}/api/chat", base_url); // Ollama chat endpoint [^3]
+        let url = format!("{}/api/chat", base_url);
 
         tokio::spawn(async move {
             let response = client
@@ -421,7 +413,6 @@ impl AiClient {
             match response {
                 Ok(mut resp) => {
                     if resp.status().is_success() {
-                        // Read the response body as a stream of bytes
                         while let Some(chunk) = resp.chunk().await.transpose() {
                             match chunk {
                                 Ok(bytes) => {
@@ -504,7 +495,6 @@ impl AiClient {
             match response {
                 Ok(resp) => {
                     if let Ok(text) = resp.text().await {
-                        // Parse Groq SSE stream (OpenAI compatible)
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
@@ -553,12 +543,12 @@ impl AiClient {
     fn format_messages_for_claude(&self, messages: &[Message]) -> Vec<serde_json::Value> {
         messages.iter().filter_map(|msg| {
             match msg.role {
-                MessageRole::System => None, // System messages handled separately in Claude
+                MessageRole::System => None,
                 _ => Some(serde_json::json!({
                     "role": match msg.role {
                         MessageRole::User => "user",
                         MessageRole::Assistant => "assistant",
-                        MessageRole::Tool => "user", // Claude treats tool results as user messages
+                        MessageRole::Tool => "user",
                         MessageRole::System => unreachable!(),
                     },
                     "content": msg.content
@@ -587,7 +577,7 @@ impl AiClient {
                     MessageRole::System => "system",
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
-                    MessageRole::Tool => "user", // Ollama often treats tool results as user messages
+                    MessageRole::Tool => "user",
                 },
                 "content": msg.content
             })

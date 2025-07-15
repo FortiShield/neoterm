@@ -1,10 +1,12 @@
 use iced::{executor, Application, Command, Element, Settings, Theme};
 use iced::widget::{column, container, scrollable, text_input, button, row, text};
-use iced::keyboard::{self, KeyCode, Modifiers}; // Import keyboard module
+use iced::keyboard::{self, KeyCode, Modifiers};
 use std::path::PathBuf;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 use std::collections::HashMap;
+use std::sync::Arc;
+use futures_util::StreamExt; // For consuming reqwest response stream
 
 mod block;
 mod shell;
@@ -38,15 +40,16 @@ mod workflows;
 mod lpc;
 mod mcq;
 mod markdown_parser;
+mod api; // New API module
 
-use block::{Block, BlockContent}; // This Block is for Iced
+use block::{Block, BlockContent};
 use shell::ShellManager;
-use input::{EnhancedTextInput, Message as InputMessage, HistoryDirection, Direction}; // Import EnhancedTextInput and its Message
+use input::{EnhancedTextInput, Message as InputMessage, HistoryDirection, Direction};
 use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage};
 use config::AppConfig;
 use crate::{
     ui::{
-        block::CommandBlock, // Use the new Iced CommandBlock
+        block::CommandBlock,
         command_palette::{CommandPalette, CommandAction},
         ai_sidebar::AISidebar,
     },
@@ -60,12 +63,12 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
-    blocks: Vec<CommandBlock>, // Now stores Iced CommandBlock
-    input_bar: EnhancedTextInput, // Use EnhancedTextInput
+    blocks: Vec<CommandBlock>,
+    input_bar: EnhancedTextInput,
     shell_manager: ShellManager,
     
     // Agent mode
-    agent_mode: Option<AgentMode>,
+    agent_mode: Arc<RwLock<AgentMode>>, // Shared state for API
     agent_enabled: bool,
     agent_streaming: bool,
     
@@ -80,10 +83,10 @@ pub struct NeoTerm {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Input(InputMessage), // Wrap input bar messages
+    Input(InputMessage),
     ExecuteCommand,
-    PtyOutput(PtyMessage), // Message from PTY async task
-    KeyboardEvent(keyboard::Event), // Capture all keyboard events
+    PtyOutput(PtyMessage),
+    KeyboardEvent(keyboard::Event),
     BlockAction(Uuid, BlockMessage),
     Tick,
     
@@ -108,15 +111,14 @@ pub enum BlockMessage {
     Rerun,
     Delete,
     Export,
-    ToggleCollapse, // Added for Iced CommandBlock
+    ToggleCollapse,
 }
 
-// Messages for PTY communication
 #[derive(Debug, Clone)]
 pub enum PtyMessage {
     OutputChunk {
         block_id: String,
-        content: String, // Plain string from VTE
+        content: String,
         is_stdout: bool,
     },
     Completed {
@@ -141,24 +143,29 @@ impl Application for NeoTerm {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let shell_manager = ShellManager::new();
         
-        // Load configuration
         let config = AppConfig::load().unwrap_or_default();
         
-        // Initialize agent mode if configured
-        let agent_mode = if let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() {
-            let mut agent_config = AgentConfig::default();
-            agent_config.api_key = Some(api_key);
-            AgentMode::new(agent_config).ok()
-        } else {
-            None
+        let agent_config = {
+            let mut cfg = AgentConfig::default();
+            if let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() {
+                cfg.ai_config.api_key = Some(api_key);
+            }
+            cfg
         };
+        let agent_mode = Arc::new(RwLock::new(AgentMode::new(agent_config).unwrap()));
+
+        // Start the API server
+        let agent_mode_clone = agent_mode.clone();
+        tokio::spawn(async move {
+            api::start_api_server(agent_mode_clone).await;
+        });
 
         let (pty_tx, pty_rx) = mpsc::channel(100);
        
         (
             Self {
                 blocks: Vec::new(),
-                input_bar: EnhancedTextInput::new(), // Initialize EnhancedTextInput
+                input_bar: EnhancedTextInput::new(),
                 shell_manager,
                 agent_mode,
                 agent_enabled: false,
@@ -185,12 +192,11 @@ impl Application for NeoTerm {
             Message::Input(input_message) => {
                 match input_message {
                     InputMessage::Submit => {
-                        // When input bar submits, execute command
                         let command = self.input_bar.value().to_string();
-                        self.input_bar.update(InputMessage::Submit); // Let input bar clear itself and add to history
+                        self.input_bar.update(InputMessage::Submit);
                         if !command.trim().is_empty() {
-                            if self.agent_enabled && self.agent_mode.is_some() {
-                                self.handle_agent_command(command)
+                            if command.starts_with("#") || command.starts_with("/ai") {
+                                self.handle_ai_command(command)
                             } else {
                                 self.execute_command(command)
                             }
@@ -205,8 +211,6 @@ impl Application for NeoTerm {
                 }
             }
             Message::ExecuteCommand => {
-                // This message is now primarily triggered by the InputMessage::Submit
-                // or other internal logic, not directly from the view.
                 Command::none()
             }
             Message::PtyOutput(pty_msg) => {
@@ -234,34 +238,37 @@ impl Application for NeoTerm {
                 Command::none()
             }
             Message::ToggleAgentMode => {
-                if let Some(ref mut agent) = self.agent_mode {
-                    self.agent_enabled = agent.toggle();
-                    if self.agent_enabled {
-                        if let Ok(_) = agent.start_conversation() {
-                            let block = CommandBlock::new_agent_message("Agent mode activated. How can I help you?".to_string());
-                            self.blocks.push(block);
-                        }
-                    } else {
-                        let block = CommandBlock::new_agent_message("Agent mode deactivated.".to_string());
-                        self.blocks.push(block);
-                    }
-                } else {
-                    if let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() {
-                        let mut agent_config = AgentConfig::default();
-                        agent_config.api_key = Some(api_key);
-                        if let Ok(agent) = AgentMode::new(agent_config) {
-                            self.agent_mode = Some(agent);
-                            self.agent_enabled = true;
-                            let block = CommandBlock::new_agent_message("Agent mode activated. How can I help you?".to_string());
-                            self.blocks.push(block);
+                let agent_mode_arc_clone = self.agent_mode.clone();
+                Command::perform(
+                    async move {
+                        let mut agent_mode = agent_mode_arc_clone.write().await;
+                        let enabled = agent_mode.toggle();
+                        if enabled {
+                            if let Ok(_) = agent_mode.start_conversation() {
+                                Some("Agent mode activated. How can I help you?".to_string())
+                            } else {
+                                None
+                            }
                         } else {
-                            let block = CommandBlock::new_error("Failed to initialize agent mode. Check your API key.".to_string());
-                            self.blocks.push(block);
+                            Some("Agent mode deactivated.".to_string())
                         }
-                    } else {
-                        let block = CommandBlock::new_error("Agent mode requires OPENAI_API_KEY environment variable.".to_string());
+                    },
+                    |msg| {
+                        if let Some(content) = msg {
+                            Message::AgentMessage(AgentMessage::SystemMessage(content))
+                        } else {
+                            Message::AgentError("Failed to start agent conversation.".to_string())
+                        }
+                    }
+                )
+            }
+            Message::AgentMessage(agent_msg) => {
+                match agent_msg {
+                    AgentMessage::SystemMessage(content) => {
+                        let block = CommandBlock::new_agent_message(content);
                         self.blocks.push(block);
                     }
+                    _ => { /* Other agent messages handled by API */ }
                 }
                 Command::none()
             }
@@ -301,7 +308,7 @@ impl Application for NeoTerm {
                             }
                             KeyCode::Tab => {
                                 self.input_bar.update(InputMessage::NavigateSuggestions(Direction::Down));
-                                self.input_bar.update(InputMessage::ApplySuggestion); // Apply on tab
+                                self.input_bar.update(InputMessage::ApplySuggestion);
                             }
                             _ => {}
                         }
@@ -310,8 +317,8 @@ impl Application for NeoTerm {
                 }
                 Command::none()
             }
-            Message::ConfigLoaded(_) => Command::none(), // Placeholder
-            Message::ConfigSaved => Command::none(), // Placeholder
+            Message::ConfigLoaded(_) => Command::none(),
+            Message::ConfigSaved => Command::none(),
             Message::SettingsMessage(msg) => {
                 let mut settings_view = settings::SettingsView::new(self.config.clone());
                 settings_view.update(msg);
@@ -350,7 +357,7 @@ impl Application for NeoTerm {
             "Enter command..."
         };
 
-        let input_view = self.input_bar.view(prompt_indicator, placeholder).map(Message::Input); // Map input bar messages
+        let input_view = self.input_bar.view(prompt_indicator, placeholder).map(Message::Input);
 
         let toolbar = self.create_toolbar();
 
@@ -364,7 +371,7 @@ impl Application for NeoTerm {
         iced::Subscription::batch(vec![
             iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
             self.pty_manager_subscription(),
-            keyboard::Event::all().map(Message::KeyboardEvent), // Subscribe to all keyboard events
+            keyboard::Event::all().map(Message::KeyboardEvent),
         ])
     }
 }
@@ -387,37 +394,73 @@ impl NeoTerm {
             .into()
     }
 
-    fn handle_agent_command(&mut self, command: String) -> Command<Message> {
-        if let Some(ref mut agent) = self.agent_mode {
-            let user_block = CommandBlock::new_user_message(command.clone());
-            self.blocks.push(user_block);
-            
-            let agent_block = CommandBlock::new_agent_message(String::new());
-            self.blocks.push(agent_block);
-            self.agent_streaming = true;
-            
-            let agent_clone = agent.clone();
-            Command::perform(
-                async move {
-                    match agent_clone.send_message(command).await {
-                        Ok(mut rx) => {
+    fn handle_ai_command(&mut self, command: String) -> Command<Message> {
+        let prompt = command.trim_start_matches('#').trim_start_matches("/ai").trim().to_string();
+        
+        let user_block = CommandBlock::new_user_message(command.clone());
+        self.blocks.push(user_block);
+        
+        let agent_block = CommandBlock::new_agent_message(String::new());
+        let agent_block_id = agent_block.id.clone();
+        self.blocks.push(agent_block);
+        self.agent_streaming = true;
+
+        Command::perform(
+            async move {
+                let client = reqwest::Client::new();
+                let request_body = api::ai::AiRequest {
+                    prompt,
+                    context_block_id: None, // TODO: Add context from selected block
+                };
+
+                let response = client
+                    .post("http://127.0.0.1:3030/api/ai")
+                    .json(&request_body)
+                    .send()
+                    .await;
+
+                match response {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            let mut stream = resp.bytes_stream();
                             let mut full_response = String::new();
-                            while let Some(chunk) = rx.recv().await {
-                                full_response.push_str(&chunk);
+                            while let Some(chunk_result) = stream.next().await {
+                                match chunk_result {
+                                    Ok(bytes) => {
+                                        let text_chunk = String::from_utf8_lossy(&bytes);
+                                        for line in text_chunk.lines() {
+                                            if line.starts_with("data: ") {
+                                                let data = &line[6..];
+                                                if let Ok(ai_chunk) = serde_json::from_str::<api::ai::AiResponseChunk>(data) {
+                                                    if ai_chunk.is_done {
+                                                        return Ok(Message::AgentStreamingChunk(full_response));
+                                                    }
+                                                    full_response.push_str(&ai_chunk.content);
+                                                    // Send partial updates to UI
+                                                    // This requires a channel back to the main update loop
+                                                    // For now, we'll send the full response at the end.
+                                                    // A more robust solution would involve a dedicated channel for streaming UI updates.
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => return Err(format!("Stream error: {}", e)),
+                                }
                             }
-                            Ok(full_response)
+                            Ok(Message::AgentStreamingChunk(full_response)) // Fallback if stream ends without done signal
+                        } else {
+                            let error_text = resp.text().await.unwrap_or_else(|_| "Unknown API error".to_string());
+                            Err(format!("API error: Status {} - {}", resp.status(), error_text))
                         }
-                        Err(e) => Err(e.to_string()),
                     }
-                },
-                |result| match result {
-                    Ok(response) => Message::AgentStreamingChunk(response),
-                    Err(error) => Message::AgentError(error),
+                    Err(e) => Err(format!("Failed to connect to AI API: {}", e)),
                 }
-            )
-        } else {
-            Command::none()
-        }
+            },
+            |result| match result {
+                Ok(msg) => msg,
+                Err(error) => Message::AgentError(error),
+            }
+        )
     }
 
     fn handle_block_action(&mut self, block_id: String, action: BlockMessage) -> Command<Message> {
@@ -426,58 +469,7 @@ impl NeoTerm {
                 BlockMessage::Rerun => {
                     if let BlockContent::Command { input, .. } = &block.content {
                         let command = input.clone();
-                        let env_vars = self.config.env_profiles.active_profile
-                            .as_ref()
-                            .and_then(|name| self.config.env_profiles.profiles.get(name))
-                            .map(|profile| profile.variables.clone());
-
-                        let pty_tx = self.pty_tx.clone();
-                        Command::perform(
-                            async move {
-                                let mut output_receiver = PtyManager::new().execute_command(&command, &[], env_vars).await.unwrap();
-                                while let Some(output) = output_receiver.recv().await {
-                                    match output.status {
-                                        CommandStatus::Running => {
-                                            if !output.stdout.is_empty() {
-                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
-                                                    block_id: block_id.clone(),
-                                                    content: output.stdout,
-                                                    is_stdout: true,
-                                                }).await;
-                                            }
-                                            if !output.stderr.is_empty() {
-                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
-                                                    block_id: block_id.clone(),
-                                                    content: output.stderr,
-                                                    is_stdout: false,
-                                                }).await;
-                                            }
-                                        }
-                                        CommandStatus::Completed(exit_code) => {
-                                            let _ = pty_tx.send(PtyMessage::Completed {
-                                                block_id: block_id.clone(),
-                                                exit_code,
-                                            }).await;
-                                            break;
-                                        }
-                                        CommandStatus::Failed(error) => {
-                                            let _ = pty_tx.send(PtyMessage::Failed {
-                                                block_id: block_id.clone(),
-                                                error,
-                                            }).await;
-                                            break;
-                                        }
-                                        CommandStatus::Killed => {
-                                            let _ = pty_tx.send(PtyMessage::Killed {
-                                                block_id: block_id.clone(),
-                                            }).await;
-                                            break;
-                                        }
-                                    }
-                                }
-                            },
-                            |_| Message::Tick
-                        )
+                        self.execute_command(command)
                     } else {
                         Command::none()
                     }
@@ -487,10 +479,10 @@ impl NeoTerm {
                     Command::none()
                 }
                 BlockMessage::Copy => {
-                    Command::none() // TODO: Implement clipboard copy
+                    Command::none()
                 }
                 BlockMessage::Export => {
-                    Command::none() // TODO: Implement export functionality
+                    Command::none()
                 }
                 BlockMessage::ToggleCollapse => {
                     block.toggle_collapse();
@@ -568,7 +560,7 @@ impl NeoTerm {
     fn add_sample_blocks(&mut self) {
         let welcome_block = CommandBlock::new_info(
             "Welcome to NeoPilot Terminal".to_string(),
-            "This is a next-generation terminal with AI assistance.\nPress 'p' to open the command palette.\nPress 'a' to toggle the AI sidebar.\nPress 'F1' to run performance benchmarks.\nUse Up/Down arrows for history, Tab for autocomplete.".to_string()
+            "This is a next-generation terminal with AI assistance.\nPress 'p' to open the command palette.\nPress 'a' to toggle the AI sidebar.\nPress 'F1' to run performance benchmarks.\nUse Up/Down arrows for history, Tab for autocomplete.\nType # or /ai followed by your query to ask the AI."
         );
         
         let sample_command = CommandBlock::new_command("$ echo 'Hello, NeoPilot!'".to_string());

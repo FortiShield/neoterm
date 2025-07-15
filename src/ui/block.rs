@@ -226,7 +226,7 @@ impl CommandBlock {
                         &mut self.scroll_offset,
                         text(output_text).size(14).width(Length::Fill)
                     )
-                    .height(Length::Units(100)) // Fixed height for scrollable output
+                    .height(Length::Units(100))
                     .into()
                 }
                 BlockContent::Info { message, .. } => {
@@ -252,7 +252,7 @@ impl CommandBlock {
                 }
             }
         } else {
-            column![].into() // Empty column if collapsed
+            column![].into()
         };
 
         column![
