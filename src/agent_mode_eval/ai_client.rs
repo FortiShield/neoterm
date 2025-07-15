@@ -16,8 +16,8 @@ pub enum AiProvider {
 pub struct AiConfig {
     pub provider: AiProvider,
     pub model: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
+    pub api_key: Option<String>, // Not strictly needed for local Ollama, but kept for consistency
+    pub base_url: Option<String>, // Base URL for the AI provider, e.g., Ollama server address
     pub temperature: f32,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
@@ -114,7 +114,7 @@ impl AiClient {
             "gemini-1.5-flash".to_string(),
         ]);
 
-        // Ollama Models
+        // Ollama Models [^3]
         available_models.insert(AiProvider::Ollama, vec![
             "llama3.2".to_string(),
             "llama3.1".to_string(),
@@ -123,9 +123,11 @@ impl AiClient {
             "phi3".to_string(),
             "qwen2.5".to_string(),
             "deepseek-coder".to_string(),
+            "llava".to_string(), // Added for multimodal support [^3]
+            "nomic-embed-text".to_string(), // Added for embeddings [^3]
         ]);
 
-        // Groq Models
+        // Groq Models [^2]
         available_models.insert(AiProvider::Groq, vec![
             "llama-3.1-70b-versatile".to_string(),
             "llama-3.1-8b-instant".to_string(),
@@ -387,10 +389,11 @@ impl AiClient {
     async fn send_ollama_message(
         &self,
         messages: Vec<Message>,
-        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
+        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>, // Ollama's tool support varies, keeping it simple for now
     ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
         let (tx, rx) = mpsc::channel(100);
         
+        // Default Ollama base URL [^3]
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("http://localhost:11434");
 
@@ -400,12 +403,12 @@ impl AiClient {
             "stream": true,
             "options": {
                 "temperature": self.config.temperature,
-                "num_predict": self.config.max_tokens.unwrap_or(4096)
+                "num_predict": self.config.max_tokens.unwrap_or(4096) // Max tokens for Ollama
             }
         });
 
         let client = self.http_client.clone();
-        let url = format!("{}/api/chat", base_url);
+        let url = format!("{}/api/chat", base_url); // Ollama chat endpoint [^3]
 
         tokio::spawn(async move {
             let response = client
@@ -416,22 +419,36 @@ impl AiClient {
                 .await;
 
             match response {
-                Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        // Parse Ollama streaming response
-                        for line in text.lines() {
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                                if let Some(message) = json["message"].as_object() {
-                                    if let Some(content) = message["content"].as_str() {
-                                        let _ = tx.send(content.to_string()).await;
+                Ok(mut resp) => {
+                    if resp.status().is_success() {
+                        // Read the response body as a stream of bytes
+                        while let Some(chunk) = resp.chunk().await.transpose() {
+                            match chunk {
+                                Ok(bytes) => {
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    for line in text.lines() {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                                            if let Some(message) = json["message"].as_object() {
+                                                if let Some(content) = message["content"].as_str() {
+                                                    let _ = tx.send(content.to_string()).await;
+                                                }
+                                            }
+                                        }
                                     }
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(format!("Error reading stream: {}", e)).await;
+                                    break;
                                 }
                             }
                         }
+                    } else {
+                        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                        let _ = tx.send(format!("Ollama API error: Status {} - {}", resp.status(), error_text)).await;
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error: {}", e)).await;
+                    let _ = tx.send(format!("Error connecting to Ollama: {}", e)).await;
                 }
             }
         });
@@ -570,7 +587,7 @@ impl AiClient {
                     MessageRole::System => "system",
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
-                    MessageRole::Tool => "user",
+                    MessageRole::Tool => "user", // Ollama often treats tool results as user messages
                 },
                 "content": msg.content
             })
@@ -597,6 +614,7 @@ mod tests {
         
         assert!(client.is_model_supported(&AiProvider::OpenAI, "gpt-4o"));
         assert!(client.is_model_supported(&AiProvider::Claude, "claude-4-sonnet-20250514"));
+        assert!(client.is_model_supported(&AiProvider::Ollama, "llama3.1"));
         assert!(!client.is_model_supported(&AiProvider::OpenAI, "invalid-model"));
     }
 
@@ -620,5 +638,10 @@ mod tests {
         assert_eq!(formatted.len(), 1);
         assert_eq!(formatted[0]["role"], "user");
         assert_eq!(formatted[0]["content"], "Hello");
+
+        let formatted_ollama = client.format_messages_for_ollama(&messages);
+        assert_eq!(formatted_ollama.len(), 1);
+        assert_eq!(formatted_ollama[0]["role"], "user");
+        assert_eq!(formatted_ollama[0]["content"], "Hello");
     }
 }
