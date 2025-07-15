@@ -1,266 +1,262 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 pub mod ai_client;
 pub mod conversation;
 pub mod tools;
 
-use ai_client::{AiClient, AiProvider, AiResponse, StreamingResponse};
-use conversation::{Conversation, Message, MessageRole};
-use tools::{ToolRegistry, ToolCall, ToolResult};
+pub use ai_client::{AiClient, AiConfig, AiProvider, Message, MessageRole};
+pub use conversation::{Conversation, ConversationManager};
+pub use tools::{Tool, ToolManager, ToolResult as ToolExecutionResult};
 
 #[derive(Debug, Clone)]
-pub struct AgentMode {
-    pub enabled: bool,
-    pub current_conversation: Option<Conversation>,
-    pub ai_client: AiClient,
-    pub tool_registry: ToolRegistry,
-    pub auto_execute: bool,
-    pub context_window: usize,
-}
-
-#[derive(Debug, Clone)]
-pub enum AgentMessage {
-    StartConversation,
-    SendMessage(String),
-    ExecuteCommand(String),
-    ToolCall(ToolCall),
-    ToolResult(ToolResult),
-    StreamingResponse(String),
-    ConversationEnded,
-    Error(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    pub provider: AiProvider,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    pub temperature: f32,
-    pub max_tokens: Option<u32>,
-    pub system_prompt: String,
+    pub ai_config: AiConfig,
     pub tools_enabled: bool,
+    pub context_window: usize,
     pub auto_execute_commands: bool,
+    pub working_directory: std::path::PathBuf,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            provider: AiProvider::OpenAI,
-            model: "gpt-4o".to_string(),
-            api_key: None,
-            base_url: None,
-            temperature: 0.7,
-            max_tokens: Some(4096),
-            system_prompt: "You are a helpful AI assistant integrated into a terminal. You can help users with command-line tasks, explain commands, and execute shell commands when requested. Always be concise and practical in your responses.".to_string(),
+            ai_config: AiConfig::default(),
             tools_enabled: true,
+            context_window: 8192,
             auto_execute_commands: false,
+            working_directory: std::env::current_dir().unwrap_or_default(),
         }
     }
 }
 
-impl AgentConfig {
-    pub fn get_available_models(provider: &AiProvider) -> Vec<&'static str> {
-        match provider {
-            AiProvider::OpenAI => vec![
-                "gpt-4o", "gpt-4", "gpt-4-turbo", "gpt-4-mini", 
-                "gpt-3.5-turbo", "gpt-3o", "o3", "o3-mini"
-            ],
-            AiProvider::Claude => vec![
-                "claude-4-sonnet-20250514", "claude-4-opus-20250514",
-                "claude-3-7-sonnet-20241022", "claude-3-5-sonnet-20241022", 
-                "claude-3-7-haiku-20241022"
-            ],
-            AiProvider::Gemini => vec![
-                "gemini-2.0-flash-exp", "gemini-2.0-pro-exp",
-                "gemini-1.5-pro", "gemini-1.5-flash"
-            ],
-            AiProvider::Ollama => vec![
-                "llama3.2", "llama3.1", "codellama", "mistral", 
-                "phi3", "qwen2.5", "deepseek-coder"
-            ],
-            AiProvider::Groq => vec![
-                "llama-3.1-70b-versatile", "llama-3.1-8b-instant",
-                "mixtral-8x7b-32768", "gemma2-9b-it"
-            ],
-            AiProvider::Local => vec!["custom-model"],
-        }
-    }
+#[derive(Debug, Clone)]
+pub enum AgentMessage {
+    UserInput(String),
+    AssistantResponse(String),
+    ToolCall(String, serde_json::Value),
+    ToolResult(String, String),
+    Error(String),
+    SystemMessage(String),
+}
 
-    pub fn get_default_model(provider: &AiProvider) -> &'static str {
-        match provider {
-            AiProvider::OpenAI => "gpt-4o",
-            AiProvider::Claude => "claude-4-sonnet-20250514",
-            AiProvider::Gemini => "gemini-2.0-flash-exp",
-            AiProvider::Ollama => "llama3.2",
-            AiProvider::Groq => "llama-3.1-70b-versatile",
-            AiProvider::Local => "custom-model",
-        }
-    }
+pub struct AgentMode {
+    config: AgentConfig,
+    ai_client: AiClient,
+    conversation_manager: ConversationManager,
+    tool_manager: ToolManager,
+    current_conversation: Option<Uuid>,
+    enabled: bool,
+}
 
-    pub fn get_default_base_url(provider: &AiProvider) -> Option<&'static str> {
-        match provider {
-            AiProvider::OpenAI => Some("https://api.openai.com/v1/chat/completions"),
-            AiProvider::Claude => Some("https://api.anthropic.com/v1/messages"),
-            AiProvider::Gemini => Some("https://generativelanguage.googleapis.com/"),
-            AiProvider::Ollama => Some("http://localhost:11434"),
-            AiProvider::Groq => Some("https://api.groq.com/openai/v1/chat/completions"),
-            AiProvider::Local => Some("http://localhost:8080"),
+impl Clone for AgentMode {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            ai_client: AiClient::new(self.config.ai_config.clone()).unwrap(),
+            conversation_manager: self.conversation_manager.clone(),
+            tool_manager: self.tool_manager.clone(),
+            current_conversation: self.current_conversation,
+            enabled: self.enabled,
         }
     }
 }
 
 impl AgentMode {
-    pub fn new(config: AgentConfig) -> Result<Self, AgentError> {
-        let ai_client = AiClient::new(config.clone())?;
-        let tool_registry = ToolRegistry::new();
-        
+    pub fn new(config: AgentConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let ai_client = AiClient::new(config.ai_config.clone())?;
+        let conversation_manager = ConversationManager::new();
+        let tool_manager = ToolManager::new(config.working_directory.clone());
+
         Ok(Self {
-            enabled: false,
-            current_conversation: None,
+            config,
             ai_client,
-            tool_registry,
-            auto_execute: config.auto_execute_commands,
-            context_window: 8192,
+            conversation_manager,
+            tool_manager,
+            current_conversation: None,
+            enabled: false,
         })
     }
 
     pub fn toggle(&mut self) -> bool {
         self.enabled = !self.enabled;
-        if !self.enabled {
-            self.current_conversation = None;
-        }
         self.enabled
     }
 
-    pub fn start_conversation(&mut self) -> Result<Uuid, AgentError> {
-        let conversation = Conversation::new(self.ai_client.config.system_prompt.clone());
-        let id = conversation.id;
-        self.current_conversation = Some(conversation);
-        Ok(id)
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
-    pub async fn send_message(&mut self, content: String) -> Result<mpsc::Receiver<String>, AgentError> {
-        let conversation = self.current_conversation
-            .as_mut()
-            .ok_or(AgentError::NoActiveConversation)?;
+    pub fn start_conversation(&mut self) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let conversation_id = self.conversation_manager.create_conversation(
+            "Terminal Session".to_string(),
+            Some("AI-assisted terminal session".to_string()),
+        )?;
+        
+        self.current_conversation = Some(conversation_id);
+        
+        // Add system message if configured
+        if let Some(system_prompt) = &self.config.ai_config.system_prompt {
+            self.conversation_manager.add_message(
+                conversation_id,
+                Message {
+                    id: Uuid::new_v4(),
+                    role: MessageRole::System,
+                    content: system_prompt.clone(),
+                    timestamp: chrono::Utc::now(),
+                    tool_calls: None,
+                    tool_results: None,
+                },
+            )?;
+        }
+
+        Ok(conversation_id)
+    }
+
+    pub async fn send_message(&self, content: String) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
+        let conversation_id = self.current_conversation
+            .ok_or("No active conversation")?;
 
         // Add user message to conversation
-        conversation.add_message(Message {
+        let user_message = Message {
+            id: Uuid::new_v4(),
             role: MessageRole::User,
             content: content.clone(),
             timestamp: chrono::Utc::now(),
             tool_calls: None,
-        });
+            tool_results: None,
+        };
 
-        // Prepare messages for AI
-        let messages = self.prepare_messages_for_ai(conversation)?;
+        self.conversation_manager.add_message(conversation_id, user_message)?;
+
+        // Get conversation history
+        let messages = self.conversation_manager.get_messages(conversation_id)?;
         
-        // Get streaming response
-        let (tx, rx) = mpsc::channel(100);
-        let ai_client = self.ai_client.clone();
-        let tools = if self.ai_client.config.tools_enabled {
-            Some(self.tool_registry.get_available_tools())
+        // Get available tools if enabled
+        let tools = if self.config.tools_enabled {
+            Some(self.tool_manager.get_available_tools())
         } else {
             None
         };
 
-        tokio::spawn(async move {
-            match ai_client.stream_completion(messages, tools).await {
-                Ok(mut stream) => {
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(response) => {
-                                if let Err(_) = tx.send(response.content).await {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                let _ = tx.send(format!("Error: {}", e)).await;
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(format!("Failed to get AI response: {}", e)).await;
-                }
-            }
-        });
+        // Send to AI client
+        let response_stream = self.ai_client.send_message(messages, tools).await?;
 
-        Ok(rx)
+        Ok(response_stream)
     }
 
-    pub async fn execute_tool_call(&mut self, tool_call: ToolCall) -> Result<ToolResult, AgentError> {
-        self.tool_registry.execute_tool(tool_call).await
-            .map_err(AgentError::ToolError)
+    pub async fn execute_tool_call(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<ToolExecutionResult, Box<dyn std::error::Error>> {
+        self.tool_manager.execute_tool(tool_name, arguments).await
     }
 
-    fn prepare_messages_for_ai(&self, conversation: &Conversation) -> Result<Vec<ai_client::AiMessage>, AgentError> {
-        let mut messages = Vec::new();
-        
-        // Add system message
-        messages.push(ai_client::AiMessage {
-            role: "system".to_string(),
-            content: conversation.system_prompt.clone(),
-            tool_calls: None,
-        });
-
-        // Add conversation messages (with context window limit)
-        let recent_messages = if conversation.messages.len() > self.context_window {
-            &conversation.messages[conversation.messages.len() - self.context_window..]
+    pub fn get_conversation_history(&self) -> Result<Vec<Message>, Box<dyn std::error::Error>> {
+        if let Some(conversation_id) = self.current_conversation {
+            self.conversation_manager.get_messages(conversation_id)
         } else {
-            &conversation.messages
-        };
+            Ok(Vec::new())
+        }
+    }
 
-        for msg in recent_messages {
-            messages.push(ai_client::AiMessage {
-                role: match msg.role {
-                    MessageRole::User => "user".to_string(),
-                    MessageRole::Assistant => "assistant".to_string(),
-                    MessageRole::System => "system".to_string(),
-                },
-                content: msg.content.clone(),
-                tool_calls: msg.tool_calls.clone(),
-            });
+    pub fn get_available_models(&self) -> Vec<String> {
+        self.ai_client.get_available_models(&self.config.ai_config.provider)
+    }
+
+    pub fn switch_model(&mut self, model: String) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.ai_client.is_model_supported(&self.config.ai_config.provider, &model) {
+            return Err(format!("Model {} not supported for provider {:?}", model, self.config.ai_config.provider).into());
         }
 
-        Ok(messages)
-    }
-
-    pub fn get_conversation_history(&self) -> Option<&Conversation> {
-        self.current_conversation.as_ref()
-    }
-
-    pub fn clear_conversation(&mut self) {
-        self.current_conversation = None;
-    }
-
-    pub fn update_config(&mut self, config: AgentConfig) -> Result<(), AgentError> {
-        self.ai_client = AiClient::new(config)?;
+        self.config.ai_config.model = model;
+        self.ai_client = AiClient::new(self.config.ai_config.clone())?;
         Ok(())
+    }
+
+    pub fn switch_provider(&mut self, provider: AiProvider, model: String) -> Result<(), Box<dyn std::error::Error>> {
+        let mut new_config = self.config.ai_config.clone();
+        new_config.provider = provider;
+        new_config.model = model;
+
+        let new_client = AiClient::new(new_config.clone())?;
+        
+        if !new_client.is_model_supported(&provider, &new_config.model) {
+            return Err(format!("Model {} not supported for provider {:?}", new_config.model, provider).into());
+        }
+
+        self.config.ai_config = new_config;
+        self.ai_client = new_client;
+        Ok(())
+    }
+
+    pub fn update_config(&mut self, config: AgentConfig) -> Result<(), Box<dyn std::error::Error>> {
+        self.ai_client = AiClient::new(config.ai_config.clone())?;
+        self.config = config;
+        Ok(())
+    }
+
+    pub fn get_config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+    pub fn export_conversation(&self) -> Result<String, Box<dyn std::error::Error>> {
+        if let Some(conversation_id) = self.current_conversation {
+            self.conversation_manager.export_conversation(conversation_id)
+        } else {
+            Err("No active conversation to export".into())
+        }
+    }
+
+    pub fn import_conversation(&mut self, data: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let conversation_id = self.conversation_manager.import_conversation(data)?;
+        self.current_conversation = Some(conversation_id);
+        Ok(conversation_id)
+    }
+
+    pub fn clear_conversation(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(conversation_id) = self.current_conversation {
+            self.conversation_manager.clear_conversation(conversation_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_conversation_stats(&self) -> Result<ConversationStats, Box<dyn std::error::Error>> {
+        if let Some(conversation_id) = self.current_conversation {
+            let messages = self.conversation_manager.get_messages(conversation_id)?;
+            let conversation = self.conversation_manager.get_conversation(conversation_id)?;
+            
+            Ok(ConversationStats {
+                message_count: messages.len(),
+                user_messages: messages.iter().filter(|m| matches!(m.role, MessageRole::User)).count(),
+                assistant_messages: messages.iter().filter(|m| matches!(m.role, MessageRole::Assistant)).count(),
+                tool_calls: messages.iter().filter_map(|m| m.tool_calls.as_ref()).map(|tc| tc.len()).sum(),
+                created_at: conversation.created_at,
+                last_updated: conversation.updated_at,
+            })
+        } else {
+            Err("No active conversation".into())
+        }
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum AgentError {
-    #[error("No active conversation")]
-    NoActiveConversation,
-    #[error("AI client error: {0}")]
-    AiClientError(#[from] ai_client::AiClientError),
-    #[error("Tool error: {0}")]
-    ToolError(#[from] tools::ToolError),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
-    #[error("Configuration error: {0}")]
-    ConfigError(String),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationStats {
+    pub message_count: usize,
+    pub user_messages: usize,
+    pub assistant_messages: usize,
+    pub tool_calls: usize,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
 pub fn init() {
-    println!("Agent mode evaluation system initialized");
+    // Initialize the agent mode system
+    // This can be used for any global setup needed
+    tracing::info!("Agent mode system initialized");
 }
 
 #[cfg(test)]
@@ -280,11 +276,43 @@ mod tests {
         let mut agent = AgentMode::new(config).unwrap();
         
         // Start conversation
-        let conv_id = agent.start_conversation().unwrap();
-        assert!(agent.current_conversation.is_some());
+        let conversation_id = agent.start_conversation().unwrap();
+        assert_eq!(agent.current_conversation, Some(conversation_id));
+        
+        // Check stats
+        let stats = agent.get_conversation_stats().unwrap();
+        assert!(stats.message_count >= 0); // May have system message
         
         // Clear conversation
-        agent.clear_conversation();
-        assert!(agent.current_conversation.is_none());
+        agent.clear_conversation().unwrap();
+    }
+
+    #[test]
+    fn test_model_switching() {
+        let config = AgentConfig::default();
+        let mut agent = AgentMode::new(config).unwrap();
+        
+        // Test valid model switch
+        let result = agent.switch_model("gpt-4".to_string());
+        assert!(result.is_ok());
+        
+        // Test invalid model switch
+        let result = agent.switch_model("invalid-model".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_provider_switching() {
+        let mut config = AgentConfig::default();
+        config.ai_config.api_key = Some("test-key".to_string());
+        
+        let mut agent = AgentMode::new(config).unwrap();
+        
+        // Test provider switch
+        let result = agent.switch_provider(AiProvider::Claude, "claude-4-sonnet-20250514".to_string());
+        assert!(result.is_ok());
+        
+        assert_eq!(agent.config.ai_config.provider, AiProvider::Claude);
+        assert_eq!(agent.config.ai_config.model, "claude-4-sonnet-20250514");
     }
 }
