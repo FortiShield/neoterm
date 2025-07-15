@@ -3,19 +3,7 @@ use iced::widget::{column, container, scrollable, text_input, button, row, text}
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
-    Terminal,
-    text::Line, // Import Line for styled text
-};
-use std::io; // Added for terminal setup
-use std::collections::HashMap; // Added for environment variables
+use std::collections::HashMap;
 
 mod block;
 mod shell;
@@ -44,20 +32,20 @@ mod plugins;
 mod collaboration;
 mod cloud;
 mod performance;
-mod sum_tree; // Added missing module import
-mod workflows; // Added missing module import
-mod lpc; // Added missing module import
-mod mcq; // Added missing module import
-mod markdown_parser; // Added missing module import
+mod sum_tree;
+mod workflows;
+mod lpc;
+mod mcq;
+mod markdown_parser;
 
-use block::{Block, BlockContent}; // This Block is for Iced, not Ratatui
+use block::{Block, BlockContent}; // This Block is for Iced
 use shell::ShellManager;
-use input::EnhancedTextInput; // This is for Iced, not Ratatui
+use input::EnhancedTextInput;
 use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage};
 use config::AppConfig;
 use crate::{
     ui::{
-        collapsible_block::{CollapsibleBlockRenderer, CollapsibleBlock, BlockType},
+        block::CommandBlock, // Use the new Iced CommandBlock
         command_palette::{CommandPalette, CommandAction},
         ai_sidebar::AISidebar,
     },
@@ -69,12 +57,9 @@ use crate::{
     performance::benchmarks::PerformanceBenchmarks,
 };
 
-// This NeoTerm struct and its Application impl are for the Iced GUI,
-// which seems to be a separate path from the Ratatui TUI.
-// For this request, we are focusing on the Ratatui TUI.
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
-    blocks: Vec<Block>,
+    blocks: Vec<CommandBlock>, // Now stores Iced CommandBlock
     current_input: String,
     input_history: Vec<String>,
     history_index: Option<usize>,
@@ -91,13 +76,17 @@ pub struct NeoTerm {
     // Configuration
     config: AppConfig,
     settings_open: bool,
+
+    // Channels for PTY communication
+    pty_tx: mpsc::Sender<PtyMessage>,
+    pty_rx: mpsc::Receiver<PtyMessage>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     InputChanged(String),
     ExecuteCommand,
-    CommandOutput(String, i32), // output, exit_code
+    PtyOutput(PtyMessage), // Message from PTY async task
     KeyPressed(iced::keyboard::Key),
     HistoryUp,
     HistoryDown,
@@ -126,6 +115,28 @@ pub enum BlockMessage {
     Rerun,
     Delete,
     Export,
+    ToggleCollapse, // Added for Iced CommandBlock
+}
+
+// Messages for PTY communication
+#[derive(Debug, Clone)]
+pub enum PtyMessage {
+    OutputChunk {
+        block_id: String,
+        content: String, // Plain string from VTE
+        is_stdout: bool,
+    },
+    Completed {
+        block_id: String,
+        exit_code: i32,
+    },
+    Failed {
+        block_id: String,
+        error: String,
+    },
+    Killed {
+        block_id: String,
+    },
 }
 
 impl Application for NeoTerm {
@@ -148,7 +159,9 @@ impl Application for NeoTerm {
         } else {
             None
         };
-        
+
+        let (pty_tx, pty_rx) = mpsc::channel(100);
+       
         (
             Self {
                 blocks: Vec::new(),
@@ -164,6 +177,8 @@ impl Application for NeoTerm {
                 agent_streaming: false,
                 config,
                 settings_open: false,
+                pty_tx,
+                pty_rx,
             },
             Command::none(),
         )
@@ -191,32 +206,91 @@ impl Application for NeoTerm {
                     self.history_index = None;
                     
                     if self.agent_enabled && self.agent_mode.is_some() {
-                        // Send to agent mode
                         self.handle_agent_command(command)
                     } else {
-                        // Regular command execution
-                        let block = Block::new_command(command.clone());
-                        self.blocks.push(block);
+                        let command_block = CommandBlock::new_command(command.clone());
+                        let block_id = command_block.id.clone();
+                        self.blocks.push(command_block);
                         self.current_input.clear();
                         
-                        // Get active environment profile variables
                         let env_vars = self.config.env_profiles.active_profile
                             .as_ref()
                             .and_then(|name| self.config.env_profiles.profiles.get(name))
                             .map(|profile| profile.variables.clone());
 
+                        let pty_tx = self.pty_tx.clone();
                         Command::perform(
-                            self.shell_manager.execute_command(command, env_vars), // Pass env_vars
-                            |(output, exit_code)| Message::CommandOutput(output, exit_code)
+                            async move {
+                                let mut output_receiver = PtyManager::new().execute_command(&command, &[], env_vars).await.unwrap();
+                                while let Some(output) = output_receiver.recv().await {
+                                    match output.status {
+                                        CommandStatus::Running => {
+                                            if !output.stdout.is_empty() {
+                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
+                                                    block_id: block_id.clone(),
+                                                    content: output.stdout,
+                                                    is_stdout: true,
+                                                }).await;
+                                            }
+                                            if !output.stderr.is_empty() {
+                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
+                                                    block_id: block_id.clone(),
+                                                    content: output.stderr,
+                                                    is_stdout: false,
+                                                }).await;
+                                            }
+                                        }
+                                        CommandStatus::Completed(exit_code) => {
+                                            let _ = pty_tx.send(PtyMessage::Completed {
+                                                block_id: block_id.clone(),
+                                                exit_code,
+                                            }).await;
+                                            break;
+                                        }
+                                        CommandStatus::Failed(error) => {
+                                            let _ = pty_tx.send(PtyMessage::Failed {
+                                                block_id: block_id.clone(),
+                                                error,
+                                            }).await;
+                                            break;
+                                        }
+                                        CommandStatus::Killed => {
+                                            let _ = pty_tx.send(PtyMessage::Killed {
+                                                block_id: block_id.clone(),
+                                            }).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            },
+                            |_| Message::Tick // Send a generic tick to trigger UI update
                         )
                     }
                 } else {
                     Command::none()
                 }
             }
-            Message::CommandOutput(output, exit_code) => {
-                if let Some(last_block) = self.blocks.last_mut() {
-                    last_block.set_output(output, exit_code);
+            Message::PtyOutput(pty_msg) => {
+                if let Some(block) = self.blocks.iter_mut().find(|b| b.id == pty_msg.get_block_id()) {
+                    match pty_msg {
+                        PtyMessage::OutputChunk { content, is_stdout, .. } => {
+                            block.add_output_line(content, is_stdout);
+                        }
+                        PtyMessage::Completed { exit_code, .. } => {
+                            block.set_status(format!("Completed with exit code: {}", exit_code));
+                            if exit_code != 0 {
+                                block.set_error(true);
+                            }
+                        }
+                        PtyMessage::Failed { error, .. } => {
+                            block.set_status(format!("Failed: {}", error));
+                            block.set_error(true);
+                        }
+                        PtyMessage::Killed { .. } => {
+                            block.set_status("Killed".to_string());
+                            block.set_error(true);
+                        }
+                    }
                 }
                 Command::none()
             }
@@ -224,31 +298,29 @@ impl Application for NeoTerm {
                 if let Some(ref mut agent) = self.agent_mode {
                     self.agent_enabled = agent.toggle();
                     if self.agent_enabled {
-                        // Start new conversation
                         if let Ok(_) = agent.start_conversation() {
-                            let block = Block::new_agent_message("Agent mode activated. How can I help you?".to_string());
+                            let block = CommandBlock::new_agent_message("Agent mode activated. How can I help you?".to_string());
                             self.blocks.push(block);
                         }
                     } else {
-                        let block = Block::new_agent_message("Agent mode deactivated.".to_string());
+                        let block = CommandBlock::new_agent_message("Agent mode deactivated.".to_string());
                         self.blocks.push(block);
                     }
                 } else {
-                    // Try to initialize agent mode
                     if let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() {
                         let mut agent_config = AgentConfig::default();
                         agent_config.api_key = Some(api_key);
                         if let Ok(agent) = AgentMode::new(agent_config) {
                             self.agent_mode = Some(agent);
                             self.agent_enabled = true;
-                            let block = Block::new_agent_message("Agent mode activated. How can I help you?".to_string());
+                            let block = CommandBlock::new_agent_message("Agent mode activated. How can I help you?".to_string());
                             self.blocks.push(block);
                         } else {
-                            let block = Block::new_error("Failed to initialize agent mode. Check your API key.".to_string());
+                            let block = CommandBlock::new_error("Failed to initialize agent mode. Check your API key.".to_string());
                             self.blocks.push(block);
                         }
                     } else {
-                        let block = Block::new_error("Agent mode requires OPENAI_API_KEY environment variable.".to_string());
+                        let block = CommandBlock::new_error("Agent mode requires OPENAI_API_KEY environment variable.".to_string());
                         self.blocks.push(block);
                     }
                 }
@@ -263,7 +335,7 @@ impl Application for NeoTerm {
                 Command::none()
             }
             Message::AgentError(error) => {
-                let block = Block::new_error(format!("Agent error: {}", error));
+                let block = CommandBlock::new_error(format!("Agent error: {}", error));
                 self.blocks.push(block);
                 self.agent_streaming = false;
                 Command::none()
@@ -304,14 +376,27 @@ impl Application for NeoTerm {
             Message::BlockAction(block_id, action) => {
                 self.handle_block_action(block_id, action)
             }
-            _ => Command::none(),
+            Message::Tick => {
+                // Used to trigger UI redraws for streaming output
+                Command::none()
+            }
+            Message::KeyPressed(_) => Command::none(), // Placeholder for keyboard events
+            Message::SuggestionSelected(_) => Command::none(), // Placeholder
+            Message::ConfigLoaded(_) => Command::none(), // Placeholder
+            Message::ConfigSaved => Command::none(), // Placeholder
+            Message::SettingsMessage(msg) => {
+                // Handle settings messages
+                let mut settings_view = settings::SettingsView::new(self.config.clone());
+                settings_view.update(msg);
+                self.config = settings_view.config; // Update main config from settings view
+                Command::none()
+            }
         }
     }
 
     fn view(&self) -> Element<Message> {
         if self.settings_open {
-            // Show settings view
-            let settings_view = settings::SettingsView::new(self.config.clone());
+            let mut settings_view = settings::SettingsView::new(self.config.clone());
             return settings_view.view().map(Message::SettingsMessage);
         }
 
@@ -319,7 +404,7 @@ impl Application for NeoTerm {
             column(
                 self.blocks
                     .iter()
-                    .map(|block| block.view())
+                    .map(|block| block.view().map(|msg| Message::BlockAction(block.id.clone(), msg)))
                     .collect::<Vec<_>>()
             )
             .spacing(8)
@@ -334,20 +419,25 @@ impl Application for NeoTerm {
             .padding(16)
             .into()
     }
+
+    fn subscription(&self) -> iced::Subscription<Message> {
+        iced::Subscription::batch(vec![
+            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
+            self.pty_manager_subscription(),
+        ])
+    }
 }
 
 impl NeoTerm {
     fn generate_suggestions(&self, input: &str) -> Vec<String> {
         let mut suggestions = Vec::new();
         
-        // Add command history matches
         for cmd in &self.input_history {
             if cmd.contains(input) && cmd != input {
                 suggestions.push(cmd.clone());
             }
         }
         
-        // Add common commands
         let common_commands = ["ls", "cd", "git", "npm", "cargo", "docker", "kubectl"];
         for cmd in &common_commands {
             if cmd.starts_with(input) && !input.is_empty() {
@@ -355,7 +445,6 @@ impl NeoTerm {
             }
         }
         
-        // Add agent mode suggestions
         if self.agent_enabled {
             let agent_suggestions = [
                 "explain this command:",
@@ -430,7 +519,6 @@ impl NeoTerm {
         let settings_button = button(text("⚙️ Settings"))
             .on_press(Message::ToggleSettings);
 
-        // Display active environment profile
         let active_profile_name = self.config.env_profiles.active_profile.as_deref().unwrap_or("None");
         let env_profile_indicator = text(format!("Env: {}", active_profile_name)).size(14);
 
@@ -443,16 +531,13 @@ impl NeoTerm {
         if let Some(ref mut agent) = self.agent_mode {
             self.current_input.clear();
             
-            // Add user message block
-            let user_block = Block::new_user_message(command.clone());
+            let user_block = CommandBlock::new_user_message(command.clone());
             self.blocks.push(user_block);
             
-            // Add streaming agent response block
-            let agent_block = Block::new_agent_message(String::new());
+            let agent_block = CommandBlock::new_agent_message(String::new());
             self.blocks.push(agent_block);
             self.agent_streaming = true;
             
-            // Send message to agent
             let agent_clone = agent.clone();
             Command::perform(
                 async move {
@@ -461,7 +546,6 @@ impl NeoTerm {
                             let mut full_response = String::new();
                             while let Some(chunk) = rx.recv().await {
                                 full_response.push_str(&chunk);
-                                // In a real implementation, you'd send streaming updates
                             }
                             Ok(full_response)
                         }
@@ -478,591 +562,130 @@ impl NeoTerm {
         }
     }
 
-    fn handle_block_action(&mut self, block_id: Uuid, action: BlockMessage) -> Command<Message> {
-        match action {
-            BlockMessage::Rerun => {
-                if let Some(block) = self.blocks.iter().find(|b| b.id == block_id) {
-                    match &block.content {
-                        BlockContent::Command { input, .. } => {
-                            let command = input.clone();
-                            // Get active environment profile variables for rerun
-                            let env_vars = self.config.env_profiles.active_profile
-                                .as_ref()
-                                .and_then(|name| self.config.env_profiles.profiles.get(name))
-                                .map(|profile| profile.variables.clone());
+    fn handle_block_action(&mut self, block_id: String, action: BlockMessage) -> Command<Message> {
+        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
+            match action {
+                BlockMessage::Rerun => {
+                    if let BlockContent::Command { input, .. } = &block.content {
+                        let command = input.clone();
+                        let env_vars = self.config.env_profiles.active_profile
+                            .as_ref()
+                            .and_then(|name| self.config.env_profiles.profiles.get(name))
+                            .map(|profile| profile.variables.clone());
 
-                            Command::perform(
-                                self.shell_manager.execute_command(command, env_vars), // Pass env_vars
-                                |(output, exit_code)| Message::CommandOutput(output, exit_code)
-                            )
-                        }
-                        _ => Command::none(),
+                        let pty_tx = self.pty_tx.clone();
+                        Command::perform(
+                            async move {
+                                let mut output_receiver = PtyManager::new().execute_command(&command, &[], env_vars).await.unwrap();
+                                while let Some(output) = output_receiver.recv().await {
+                                    match output.status {
+                                        CommandStatus::Running => {
+                                            if !output.stdout.is_empty() {
+                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
+                                                    block_id: block_id.clone(),
+                                                    content: output.stdout,
+                                                    is_stdout: true,
+                                                }).await;
+                                            }
+                                            if !output.stderr.is_empty() {
+                                                let _ = pty_tx.send(PtyMessage::OutputChunk {
+                                                    block_id: block_id.clone(),
+                                                    content: output.stderr,
+                                                    is_stdout: false,
+                                                }).await;
+                                            }
+                                        }
+                                        CommandStatus::Completed(exit_code) => {
+                                            let _ = pty_tx.send(PtyMessage::Completed {
+                                                block_id: block_id.clone(),
+                                                exit_code,
+                                            }).await;
+                                            break;
+                                        }
+                                        CommandStatus::Failed(error) => {
+                                            let _ = pty_tx.send(PtyMessage::Failed {
+                                                block_id: block_id.clone(),
+                                                error,
+                                            }).await;
+                                            break;
+                                        }
+                                        CommandStatus::Killed => {
+                                            let _ = pty_tx.send(PtyMessage::Killed {
+                                                block_id: block_id.clone(),
+                                            }).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            },
+                            |_| Message::Tick
+                        )
+                    } else {
+                        Command::none()
                     }
-                } else {
+                }
+                BlockMessage::Delete => {
+                    self.blocks.retain(|b| b.id != block_id);
+                    Command::none()
+                }
+                BlockMessage::Copy => {
+                    Command::none() // TODO: Implement clipboard copy
+                }
+                BlockMessage::Export => {
+                    Command::none() // TODO: Implement export functionality
+                }
+                BlockMessage::ToggleCollapse => {
+                    block.toggle_collapse();
                     Command::none()
                 }
             }
-            BlockMessage::Delete => {
-                self.blocks.retain(|b| b.id != block_id);
-                Command::none()
-            }
-            BlockMessage::Copy => {
-                // TODO: Implement clipboard copy
-                Command::none()
-            }
-            BlockMessage::Export => {
-                // TODO: Implement export functionality
-                Command::none()
-            }
-        }
-    }
-}
-
-// New AppMessage enum for communication between async tasks and the main TUI loop
-#[derive(Debug)]
-enum AppMessage {
-    TerminalEvent(Event),
-    CommandOutputChunk {
-        block_id: String,
-        content: Vec<Line>, // Changed to Vec<Line> for styled output
-    },
-    CommandCompleted {
-        block_id: String,
-        exit_code: i32,
-    },
-    CommandFailed {
-        block_id: String,
-        error: String,
-    },
-}
-
-// The main application struct for the Ratatui TUI
-struct App {
-    mode: AppMode,
-    block_renderer: CollapsibleBlockRenderer,
-    command_palette: CommandPalette,
-    ai_sidebar: AISidebar,
-    pty_manager: PtyManager,
-    workflow_debugger: WorkflowDebugger,
-    plugin_manager: PluginManager,
-    session_manager: SessionSharingManager,
-    sync_manager: Option<CloudSyncManager>,
-    input_buffer: String,
-    should_quit: bool,
-    config: AppConfig,
-    // Channel for sending messages from async tasks to the main event loop
-    tx: mpsc::Sender<AppMessage>,
-    rx: mpsc::Receiver<AppMessage>,
-}
-
-#[derive(Debug)]
-enum AppMode {
-    Normal,
-    CommandPalette,
-    AIChat,
-    WorkflowDebug,
-    Settings,
-}
-
-impl App {
-    fn new() -> Self {
-        let config = AppConfig::load().unwrap_or_default();
-        let (tx, rx) = mpsc::channel(100); // Channel for async updates
-        Self {
-            mode: AppMode::Normal,
-            block_renderer: CollapsibleBlockRenderer::new(),
-            command_palette: CommandPalette::new(),
-            ai_sidebar: AISidebar::new(),
-            pty_manager: PtyManager::new(),
-            workflow_debugger: WorkflowDebugger::new(),
-            plugin_manager: PluginManager::new(),
-            session_manager: SessionSharingManager::new(),
-            sync_manager: None,
-            input_buffer: String::new(),
-            should_quit: false,
-            config,
-            tx,
-            rx,
-        }
-    }
-
-    async fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<(), Box<dyn std::error::Error>> {
-        // Initialize cloud sync if configured
-        if let (Ok(api_url), Ok(api_key)) = (std::env::var("NEOTERM_API_URL"), std::env::var("NEOTERM_API_KEY")) {
-            self.sync_manager = Some(CloudSyncManager::new(api_url, api_key));
-        }
-
-        // Add some sample blocks for demonstration
-        self.add_sample_blocks();
-
-        loop {
-            terminal.draw(|f| self.ui(f))?;
-
-            // Process AI responses (if any are pending from previous turns)
-            self.ai_sidebar.process_ai_response();
-
-            tokio::select! {
-                // Prioritize terminal events
-                event_result = event::read() => {
-                    if let Ok(event) = event_result {
-                        if let Event::Key(key) = event {
-                            if key.kind == KeyEventKind::Press {
-                                match self.mode {
-                                    AppMode::Normal => self.handle_normal_mode_input(key.code).await?,
-                                    AppMode::CommandPalette => self.handle_command_palette_input(key.code).await?,
-                                    AppMode::AIChat => self.handle_ai_chat_input(key.code).await?,
-                                    AppMode::WorkflowDebug => self.handle_workflow_debug_input(key.code).await?,
-                                    AppMode::Settings => self.handle_settings_input(key.code).await?,
-                                }
-                            }
-                        }
-                    }
-                },
-                // Handle messages from async tasks (e.g., command output)
-                Some(app_message) = self.rx.recv() => {
-                    self.handle_app_message(app_message).await?;
-                }
-                else => {
-                    // No events or messages, yield to prevent busy-looping
-                    tokio::task::yield_now().await;
-                }
-            }
-
-            if self.should_quit {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn ui<B: Backend>(&mut self, f: &mut ratatui::Frame<B>) {
-        let size = f.size();
-
-        // Main layout
-        let chunks = if self.ai_sidebar.is_open {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(70),
-                    Constraint::Percentage(30),
-                ])
-                .split(size)
         } else {
-            vec![size]
-        };
-
-        let main_area = chunks[0];
-
-        // Split main area into blocks and input
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ])
-            .split(main_area);
-
-        // Render blocks
-        self.block_renderer.render(f, main_chunks[0]);
-
-        // Render input area
-        let input_block = ratatui::widgets::Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .title("Input");
-        
-        let input_paragraph = ratatui::widgets::Paragraph::new(self.input_buffer.as_str())
-            .block(input_block)
-            .wrap(ratatui::widgets::Wrap { trim: true });
-        
-        f.render_widget(input_paragraph, main_chunks[1]);
-
-        // Render AI sidebar if open
-        if self.ai_sidebar.is_open {
-            self.ai_sidebar.render(f, chunks[1]);
+            Command::none()
         }
-
-        // Render command palette if open
-        self.command_palette.render(f, size);
-
-        // Show mode indicator and active environment profile
-        let mode_text = match self.mode {
-            AppMode::Normal => "NORMAL",
-            AppMode::CommandPalette => "COMMAND",
-            AppMode::AIChat => "AI CHAT",
-            AppMode::WorkflowDebug => "DEBUG",
-            AppMode::Settings => "SETTINGS",
-        };
-
-        let active_profile_name = self.config.env_profiles.active_profile.as_deref().unwrap_or("None");
-        let status_text = format!("{} | Env: {}", mode_text, active_profile_name);
-
-        let status_paragraph = ratatui::widgets::Paragraph::new(status_text)
-            .style(ratatui::style::Style::default().fg(ratatui::style::Color::Yellow))
-            .alignment(ratatui::layout::Alignment::Right);
-        
-        let status_area = ratatui::layout::Rect {
-            x: size.width.saturating_sub(status_text.len() as u16),
-            y: 0,
-            width: status_text.len() as u16,
-            height: 1,
-        };
-        
-        f.render_widget(status_paragraph, status_area);
-    }
-
-    async fn handle_app_message(&mut self, message: AppMessage) -> Result<(), Box<dyn std::error::Error>> {
-        match message {
-            AppMessage::TerminalEvent(_) => { /* Handled by select! */ }
-            AppMessage::CommandOutputChunk { block_id, content } => { // content is now Vec<Line>
-                if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
-                    for line in content {
-                        block.add_line(line); // Pass Line directly
-                    }
-                }
-            }
-            AppMessage::CommandCompleted { block_id, exit_code } => {
-                if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
-                    block.add_line(Line::from(format!("[Command completed with exit code: {}]", exit_code))); // Convert string to Line
-                    if exit_code != 0 {
-                        block.block_type = BlockType::Error; // Mark as error if non-zero exit
-                    }
-                }
-            }
-            AppMessage::CommandFailed { block_id, error } => {
-                if let Some(block) = self.block_renderer.blocks.iter_mut().find(|b| b.id == block_id) {
-                    block.add_line(Line::from(format!("[Command failed: {}]", error))); // Convert string to Line
-                    block.block_type = BlockType::Error;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_normal_mode_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
-        match key {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char(' ') => self.block_renderer.toggle_selected_block(),
-            KeyCode::Up => self.block_renderer.move_selection_up(),
-            KeyCode::Down => self.block_renderer.move_selection_down(),
-            KeyCode::Char('p') => {
-                self.command_palette.toggle();
-                self.mode = if self.command_palette.is_open {
-                    AppMode::CommandPalette
-                } else {
-                    AppMode::Normal
-                };
-            }
-            KeyCode::Char('a') => {
-                self.ai_sidebar.toggle();
-                if self.ai_sidebar.is_open {
-                    self.mode = AppMode::AIChat;
-                }
-            }
-            KeyCode::Enter => {
-                if !self.input_buffer.is_empty() {
-                    self.execute_command().await?;
-                }
-            }
-            KeyCode::Char(c) => {
-                self.input_buffer.push(c);
-            }
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
-            }
-            KeyCode::F(1) => {
-                // Run performance benchmarks
-                let mut benchmarks = PerformanceBenchmarks::new();
-                let suite = benchmarks.run_all_benchmarks().await;
-                
-                let mut benchmark_block = CollapsibleBlock::new(
-                    "Performance Benchmarks".to_string(),
-                    BlockType::Info
-                );
-                benchmark_block.add_line(Line::from(benchmarks.get_performance_summary())); // Convert string to Line
-                self.block_renderer.add_block(benchmark_block);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn handle_command_palette_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
-        match key {
-            KeyCode::Esc => {
-                self.command_palette.toggle();
-                self.mode = AppMode::Normal;
-            }
-            KeyCode::Enter => {
-                if let Some(action) = self.command_palette.execute_selected() {
-                    self.execute_command_action(action).await?;
-                }
-                self.mode = AppMode::Normal;
-            }
-            KeyCode::Up => self.command_palette.move_selection_up(),
-            KeyCode::Down => self.command_palette.move_selection_down(),
-            KeyCode::Char(c) => self.command_palette.add_char(c),
-            KeyCode::Backspace => self.command_palette.remove_char(),
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn handle_ai_chat_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
-        match key {
-            KeyCode::Esc => {
-                self.mode = AppMode::Normal;
-            }
-            KeyCode::Enter => {
-                self.ai_sidebar.send_message()?;
-            }
-            KeyCode::Char(c) => self.ai_sidebar.add_char(c),
-            KeyCode::Backspace => self.ai_sidebar.remove_char(),
-            KeyCode::PageUp => self.ai_sidebar.scroll_up(),
-            KeyCode::PageDown => self.ai_sidebar.scroll_down(),
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn handle_workflow_debug_input(&mut self, _key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
-        // Workflow debugger input handling would go here
-        Ok(())
-    }
-
-    async fn handle_settings_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
-        // Settings input handling would go here
-        // For now, just allow escaping back to normal mode
-        match key {
-            KeyCode::Esc => {
-                self.mode = AppMode::Normal;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn execute_command(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let command_input = self.input_buffer.clone();
-        self.input_buffer.clear();
-
-        // Add command input block
-        let command_block = CollapsibleBlock::new(
-            Line::from(format!("$ {}", command_input)), // Convert string to Line
-            BlockType::Command
-        );
-        self.block_renderer.add_block(command_block);
-
-        // Create an output block to stream into
-        let output_block = CollapsibleBlock::new(
-            Line::from("Output"), // Convert string to Line
-            BlockType::Output
-        );
-        let output_block_id = output_block.id.clone();
-        self.block_renderer.add_block(output_block);
-
-        // Parse command
-        let parts: Vec<&str> = command_input.split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(());
-        }
-
-        let cmd = parts[0];
-        let args = parts[1..].to_vec();
-
-        // Get active environment profile variables
-        let env_vars = self.config.env_profiles.active_profile
-            .as_ref()
-            .and_then(|name| self.config.env_profiles.profiles.get(name))
-            .map(|profile| profile.variables.clone());
-
-        let tx_clone = self.tx.clone(); // Clone sender for the async task
-
-        // Execute command via PTY and stream output
-        let mut output_receiver = self.pty_manager.execute_command(cmd, args, env_vars).await?;
-        
-        tokio::spawn(async move {
-            while let Some(output) = output_receiver.recv().await {
-                match output.status {
-                    CommandStatus::Running => {
-                        // Send both stdout and stderr as styled lines
-                        if !output.stdout.is_empty() {
-                            let _ = tx_clone.send(AppMessage::CommandOutputChunk {
-                                block_id: output_block_id.clone(),
-                                content: output.stdout, // Already Vec<Line>
-                            }).await;
-                        }
-                        if !output.stderr.is_empty() {
-                            let _ = tx_clone.send(AppMessage::CommandOutputChunk {
-                                block_id: output_block_id.clone(),
-                                content: output.stderr, // Already Vec<Line>
-                            }).await;
-                        }
-                    }
-                    CommandStatus::Completed(exit_code) => {
-                        let _ = tx_clone.send(AppMessage::CommandCompleted {
-                            block_id: output_block_id.clone(),
-                            exit_code,
-                        }).await;
-                        break;
-                    }
-                    CommandStatus::Failed(error) => {
-                        let _ = tx_clone.send(AppMessage::CommandFailed {
-                            block_id: output_block_id.clone(),
-                            error,
-                        }).await;
-                        break;
-                    }
-                    CommandStatus::Killed => {
-                        let _ = tx_clone.send(AppMessage::CommandFailed {
-                            block_id: output_block_id.clone(),
-                            error: "Command was killed".to_string(),
-                        }).await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    async fn execute_command_action(&mut self, action: CommandAction) -> Result<(), Box<dyn std::error::Error>> {
-        match action {
-            CommandAction::ToggleCollapse => {
-                self.block_renderer.toggle_selected_block();
-            }
-            CommandAction::NewTab => {
-                // Implement new tab functionality
-                let mut info_block = CollapsibleBlock::new(
-                    Line::from("New Tab"), // Convert string to Line
-                    BlockType::Info
-                );
-                info_block.add_line(Line::from("New tab functionality would be implemented here")); // Convert string to Line
-                self.block_renderer.add_block(info_block);
-            }
-            CommandAction::CloseTab => {
-                // Implement close tab functionality
-            }
-            CommandAction::SearchBlocks => {
-                // Implement block search functionality
-            }
-            CommandAction::ClearHistory => {
-                self.block_renderer = CollapsibleBlockRenderer::new();
-            }
-            CommandAction::AIChat => {
-                self.ai_sidebar.toggle();
-                if self.ai_sidebar.is_open {
-                    self.mode = AppMode::AIChat;
-                }
-            }
-            CommandAction::AIExplain => {
-                // Get current block content and ask AI to explain
-                if let Some(selected_block) = self.block_renderer.blocks.get(self.block_renderer.selected_index) {
-                    // Convert Vec<Line> to a single string for context
-                    let context_lines: Vec<String> = selected_block.content.iter()
-                        .map(|line| line.spans.iter().map(|span| span.content.to_string()).collect::<String>())
-                        .collect();
-                    let context = format!("Please explain this terminal output: {}", context_lines.join("\n"));
-                    self.ai_sidebar.inject_terminal_context(&context);
-                    self.ai_sidebar.toggle();
-                    self.mode = AppMode::AIChat;
-                }
-            }
-            CommandAction::OpenSettings => {
-                self.mode = AppMode::Settings;
-            }
-            CommandAction::ShowHelp => {
-                let mut help_block = CollapsibleBlock::new(
-                    Line::from("Help"), // Convert string to Line
-                    BlockType::Info
-                );
-                help_block.add_line(Line::from("Keybindings:")); // Convert string to Line
-                help_block.add_line(Line::from("  q - Quit")); // Convert string to Line
-                help_block.add_line(Line::from("  Space - Toggle block collapse")); // Convert string to Line
-                help_block.add_line(Line::from("  Up/Down - Navigate blocks")); // Convert string to Line
-                help_block.add_line(Line::from("  p - Open command palette")); // Convert string to Line
-                help_block.add_line(Line::from("  a - Toggle AI sidebar")); // Convert string to Line
-                help_block.add_line(Line::from("  F1 - Run performance benchmarks")); // Convert string to Line
-                self.block_renderer.add_block(help_block);
-            }
-            CommandAction::RunWorkflow(workflow_name) => {
-                let mut workflow_block = CollapsibleBlock::new(
-                    Line::from(format!("Running workflow: {}", workflow_name)), // Convert string to Line
-                    BlockType::Info
-                );
-                workflow_block.add_line(Line::from("Workflow execution would be implemented here")); // Convert string to Line
-                self.block_renderer.add_block(workflow_block);
-            }
-            CommandAction::Custom(command) => {
-                self.input_buffer = command;
-                self.execute_command().await?;
-            }
-        }
-        Ok(())
     }
 
     fn add_sample_blocks(&mut self) {
-        use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::Span;
+        let welcome_block = CommandBlock::new_info(
+            "Welcome to NeoPilot Terminal".to_string(),
+            "This is a next-generation terminal with AI assistance.\nPress 'p' to open the command palette.\nPress 'a' to toggle the AI sidebar.\nPress 'F1' to run performance benchmarks.".to_string()
+        );
+        
+        let sample_command = CommandBlock::new_command("$ echo 'Hello, NeoPilot!'".to_string());
+        let mut sample_output = CommandBlock::new_output("".to_string());
+        sample_output.add_output_line("Hello, NeoPilot!".to_string(), true);
+        sample_output.set_status("Completed with exit code: 0".to_string());
+        
+        self.blocks.push(welcome_block);
+        self.blocks.push(sample_command);
+        self.blocks.push(sample_output);
+    }
 
-        let mut welcome_block = CollapsibleBlock::new(
-            Line::from("Welcome to NeoPilot Terminal"),
-            BlockType::Info
-        );
-        welcome_block.add_line(Line::from("This is a next-generation terminal with AI assistance."));
-        welcome_block.add_line(Line::from("Press 'p' to open the command palette."));
-        welcome_block.add_line(Line::from("Press 'a' to toggle the AI sidebar."));
-        welcome_block.add_line(Line::from("Press 'F1' to run performance benchmarks."));
-        
-        let mut sample_command = CollapsibleBlock::new(
-            Line::from(vec![
-                Span::raw("$ "),
-                Span::styled("echo 'Hello, NeoPilot!'", Style::default().fg(Color::Green)),
-            ]),
-            BlockType::Command
-        );
-        
-        let mut sample_output = CollapsibleBlock::new(
-            Line::from("Output"),
-            BlockType::Output
-        );
-        sample_output.add_line(Line::from(vec![
-            Span::styled("Hello, NeoPilot!", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]));
-        sample_output.add_line(Line::from("[Command completed with exit code: 0]"));
-        
-        self.block_renderer.add_block(welcome_block);
-        self.block_renderer.add_block(sample_command);
-        self.block_renderer.add_block(sample_output);
+    fn pty_manager_subscription(&self) -> iced::Subscription<Message> {
+        iced::Subscription::unfold(
+            "pty_manager_events",
+            self.pty_rx.clone(),
+            |mut receiver| async move {
+                let msg = receiver.recv().await.unwrap();
+                (Message::PtyOutput(msg), receiver)
+            },
+        )
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Create app and run it
-    let mut app = App::new();
-    let res = app.run(&mut terminal).await;
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{:?}", err);
+impl PtyMessage {
+    fn get_block_id(&self) -> &str {
+        match self {
+            PtyMessage::OutputChunk { block_id, .. } => block_id,
+            PtyMessage::Completed { block_id, .. } => block_id,
+            PtyMessage::Failed { block_id, .. } => block_id,
+            PtyMessage::Killed { block_id, .. } => block_id,
+        }
     }
+}
 
-    Ok(())
+fn main() -> iced::Result {
+    NeoTerm::run(Settings {
+        antialiasing: true,
+        ..Settings::default()
+    })
 }

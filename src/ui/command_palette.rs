@@ -9,6 +9,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::fuzzy_match;
+use iced::{Element, widget::{column, text, container, text_input}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
@@ -31,24 +32,25 @@ pub enum CommandCategory {
     System,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum CommandAction {
     ToggleCollapse,
     NewTab,
     CloseTab,
     SearchBlocks,
     ClearHistory,
-    OpenSettings,
-    RunWorkflow(String),
     AIChat,
     AIExplain,
+    OpenSettings,
     ShowHelp,
+    RunWorkflow(String),
     Custom(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct CommandPalette {
     pub is_open: bool,
-    pub query: String,
+    pub input_buffer: String,
     pub commands: Vec<Command>,
     pub filtered_commands: Vec<(Command, f64)>, // (command, score)
     pub selected_index: usize,
@@ -59,7 +61,7 @@ impl CommandPalette {
     pub fn new() -> Self {
         let mut palette = Self {
             is_open: false,
-            query: String::new(),
+            input_buffer: String::new(),
             commands: Vec::new(),
             filtered_commands: Vec::new(),
             selected_index: 0,
@@ -152,33 +154,29 @@ impl CommandPalette {
 
     pub fn toggle(&mut self) {
         self.is_open = !self.is_open;
+        if !self.is_open {
+            self.input_buffer.clear(); // Clear input when closing
+        }
         if self.is_open {
-            self.query.clear();
+            self.input_buffer.clear();
             self.selected_index = 0;
             self.scroll_offset = 0;
             self.update_filtered_commands();
         }
     }
 
-    pub fn update_query(&mut self, query: String) {
-        self.query = query;
-        self.selected_index = 0;
-        self.scroll_offset = 0;
-        self.update_filtered_commands();
-    }
-
     pub fn add_char(&mut self, c: char) {
-        self.query.push(c);
+        self.input_buffer.push(c);
         self.update_filtered_commands();
     }
 
     pub fn remove_char(&mut self) {
-        self.query.pop();
+        self.input_buffer.pop();
         self.update_filtered_commands();
     }
 
     fn update_filtered_commands(&mut self) {
-        if self.query.is_empty() {
+        if self.input_buffer.is_empty() {
             self.filtered_commands = self.commands
                 .iter()
                 .map(|cmd| (cmd.clone(), 1.0))
@@ -187,8 +185,8 @@ impl CommandPalette {
             let mut scored_commands: Vec<(Command, f64)> = self.commands
                 .iter()
                 .filter_map(|cmd| {
-                    let name_score = fuzzy_match::fuzzy_match(&self.query, &cmd.name);
-                    let desc_score = fuzzy_match::fuzzy_match(&self.query, &cmd.description);
+                    let name_score = fuzzy_match::fuzzy_match(&self.input_buffer, &cmd.name);
+                    let desc_score = fuzzy_match::fuzzy_match(&self.input_buffer, &cmd.description);
                     
                     let best_score = name_score.max(desc_score);
                     if best_score > 0.3 {
@@ -251,7 +249,7 @@ impl CommandPalette {
             .split(popup_area);
 
         // Render input box
-        let input = Paragraph::new(self.query.as_str())
+        let input = Paragraph::new(self.input_buffer.as_str())
             .style(Style::default().fg(Color::Yellow))
             .block(
                 Block::default()
@@ -356,6 +354,40 @@ impl CommandPalette {
         self.commands.retain(|cmd| cmd.id != id);
         self.update_filtered_commands();
     }
+
+    pub fn view(&self) -> Element<crate::Message> {
+        if !self.is_open {
+            return column![].into();
+        }
+
+        container(
+            column![
+                text("Command Palette (Iced Placeholder)").size(20),
+                text_input("Type command...", &self.input_buffer)
+                    .on_input(|s| {
+                        // This would typically be handled by a specific message for the palette
+                        // For now, just update the internal buffer
+                        crate::Message::InputChanged(s) // This is a hack, needs proper message routing
+                    })
+                    .padding(8),
+                text("Suggestions...").size(14),
+            ]
+            .spacing(10)
+            .padding(10)
+        )
+        .width(iced::Length::FillPortion(1))
+        .height(iced::Length::FillPortion(1))
+        .style(iced::widget::container::Appearance {
+            background: Some(iced::Color::from_rgb(0.1, 0.1, 0.1).into()),
+            border_radius: 8.0.into(),
+            border_width: 2.0,
+            border_color: iced::Color::from_rgb(0.5, 0.5, 0.5),
+            ..Default::default()
+        })
+        .center_x()
+        .center_y()
+        .into()
+    }
 }
 
 #[cfg(test)]
@@ -373,7 +405,12 @@ mod tests {
     #[test]
     fn test_command_filtering() {
         let mut palette = CommandPalette::new();
-        palette.update_query("toggle".to_string());
+        palette.add_char('t');
+        palette.add_char('o');
+        palette.add_char('g');
+        palette.add_char('g');
+        palette.add_char('l');
+        palette.add_char('e');
         
         assert!(palette.filtered_commands.iter()
             .any(|(cmd, _)| cmd.name.to_lowercase().contains("toggle")));

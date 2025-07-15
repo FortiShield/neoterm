@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use std::collections::VecDeque;
 use crate::agent_mode_eval::{AIClient, Conversation, Message, MessageRole};
+use iced::{Element, widget::{column, text, container}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -370,6 +371,27 @@ impl AISidebar {
             .count();
         
         format!("Chat: {} messages ({} from user)", message_count, user_messages)
+    }
+
+    pub fn view(&self) -> Element<crate::Message> {
+        container(
+            column![
+                text("AI Sidebar (Iced Placeholder)").size(20),
+                text("Chat with AI here...").size(16),
+            ]
+            .spacing(10)
+            .padding(10)
+        )
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+        .style(iced::widget::container::Appearance {
+            background: Some(iced::Color::from_rgb(0.15, 0.15, 0.15).into()),
+            border_radius: 5.0.into(),
+            border_width: 1.0,
+            border_color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+            ..Default::default()
+        })
+        .into()
     }
 }
 
