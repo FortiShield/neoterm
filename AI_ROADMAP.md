@@ -48,7 +48,7 @@
 
 # 📁 AI Module Directory Structure
 
-\`\`\`plaintext
+```plaintext
 src/ai/
 ├── mod.rs               # Top-level module file
 ├── assistant.rs         # suggest(), fix(), explain(), etc.
@@ -58,3 +58,4 @@ src/ai/
 │   ├── openai.rs        # OpenAI GPT API support
 │   ├── ollama.rs        # Local llama.cpp/Ollama support
 │   └── anthropic.rs     # Optional Claude API support
+
