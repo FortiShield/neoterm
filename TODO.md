@@ -28,6 +28,67 @@
 - [x] Custom themes (YAML-based) *(theme_editor.rs)*
 - [ ] GPU acceleration with `wgpu`
 
+## 🖥️ GPU acceleration
+
+### Phase 1: Base Terminal Architecture
+-[] portable-pty for launching shell
+-[] vte parser for ANSI codes, command blocks
+-[] sum_tree or string_offset for scrollback buffer
+-[] TUI layout using ratatui (fallback mode)
+
+### Phase 2: GUI Mode
+-[] Use iced with wgpu backend
+-[] Draw blocks as independent widgets (CommandBlock struct)
+-[] Add scrollable history
+-[] Text input bar with autocomplete
+-[] Support mouse/keyboard selection, resizing panes
+-[] Use vte output to populate blocks
+
+### Phase 3:  Input Engine + Autocomplete
+-[] Parse shell prompt boundaries (OSC 133 / ZSH markers)
+-[] Capture stdin and track commands per block
+-[] Use tree-sitter (optional) or regex to suggest CLI completions
+-[] Tab or AI-assisted autocomplete from history or OpenAI
+
+###  Phase 4: AI Integration
+-[] Add /api/ai route (via axum or warp)
+-[] Accept block content and return explanation/rewrites
+-[] Show inline response in the block UI
+-[] Add # or /ai command trigger
+
+### Phase 5: Advanced UI
+-[] Tabs + Panes like iTerm or Kitty
+-[] Custom keybindings
+-[] Search history (Ctrl+R-style overlay)
+-[] Save/load sessions with SQLite
+
+
+🔧 Suggested File Architecture
+
+src/
+├── main.rs                 # entry point
+├── state.rs                # app state, current blocks, inputs
+├── pty.rs                  # PTY runner, vte parser
+├── ui/                     # iced GUI system
+│   ├── mod.rs
+│   ├── block.rs            # command block rendering
+│   ├── sidebar.rs          # workflow/command palette
+│   ├── input.rs            # command input & suggestion
+├── tui/                    # ratatui fallback (optional)
+│   ├── mod.rs
+│   ├── render.rs
+├── ai/                     # OpenAI/Claude completion
+│   ├── mod.rs
+│   ├── engine.rs
+├── plugin/                 # Lua/WASI plugin engine
+│   ├── mod.rs
+│   ├── runtime.rs
+├── renderer.rs             # iced + wgpu setup (only in GUI mode)
+├── config.rs               # settings, keybindings
+├── sum_tree.rs             # session structure
+├── string_offset.rs        # Unicode-aware slicing
+
+
 ### Visual Enhancements
 - [ ] Rounded corners and padding controls
 - [ ] Font ligature support
