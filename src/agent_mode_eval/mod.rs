@@ -50,7 +50,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             provider: AiProvider::OpenAI,
-            model: "gpt-4".to_string(),
+            model: "gpt-4o".to_string(),
             api_key: None,
             base_url: None,
             temperature: 0.7,
@@ -58,6 +58,57 @@ impl Default for AgentConfig {
             system_prompt: "You are a helpful AI assistant integrated into a terminal. You can help users with command-line tasks, explain commands, and execute shell commands when requested. Always be concise and practical in your responses.".to_string(),
             tools_enabled: true,
             auto_execute_commands: false,
+        }
+    }
+}
+
+impl AgentConfig {
+    pub fn get_available_models(provider: &AiProvider) -> Vec<&'static str> {
+        match provider {
+            AiProvider::OpenAI => vec![
+                "gpt-4o", "gpt-4", "gpt-4-turbo", "gpt-4-mini", 
+                "gpt-3.5-turbo", "gpt-3o", "o3", "o3-mini"
+            ],
+            AiProvider::Claude => vec![
+                "claude-4-sonnet-20250514", "claude-4-opus-20250514",
+                "claude-3-7-sonnet-20241022", "claude-3-5-sonnet-20241022", 
+                "claude-3-7-haiku-20241022"
+            ],
+            AiProvider::Gemini => vec![
+                "gemini-2.0-flash-exp", "gemini-2.0-pro-exp",
+                "gemini-1.5-pro", "gemini-1.5-flash"
+            ],
+            AiProvider::Ollama => vec![
+                "llama3.2", "llama3.1", "codellama", "mistral", 
+                "phi3", "qwen2.5", "deepseek-coder"
+            ],
+            AiProvider::Groq => vec![
+                "llama-3.1-70b-versatile", "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768", "gemma2-9b-it"
+            ],
+            AiProvider::Local => vec!["custom-model"],
+        }
+    }
+
+    pub fn get_default_model(provider: &AiProvider) -> &'static str {
+        match provider {
+            AiProvider::OpenAI => "gpt-4o",
+            AiProvider::Claude => "claude-4-sonnet-20250514",
+            AiProvider::Gemini => "gemini-2.0-flash-exp",
+            AiProvider::Ollama => "llama3.2",
+            AiProvider::Groq => "llama-3.1-70b-versatile",
+            AiProvider::Local => "custom-model",
+        }
+    }
+
+    pub fn get_default_base_url(provider: &AiProvider) -> Option<&'static str> {
+        match provider {
+            AiProvider::OpenAI => Some("https://api.openai.com/v1/chat/completions"),
+            AiProvider::Claude => Some("https://api.anthropic.com/v1/messages"),
+            AiProvider::Gemini => Some("https://generativelanguage.googleapis.com/"),
+            AiProvider::Ollama => Some("http://localhost:11434"),
+            AiProvider::Groq => Some("https://api.groq.com/openai/v1/chat/completions"),
+            AiProvider::Local => Some("http://localhost:8080"),
         }
     }
 }

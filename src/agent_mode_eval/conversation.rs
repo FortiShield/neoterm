@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Conversation {
     pub id: Uuid,
     pub system_prompt: String,
@@ -31,9 +31,9 @@ pub enum MessageRole {
 pub struct ConversationMetadata {
     pub title: Option<String>,
     pub tags: Vec<String>,
-    pub token_count: u32,
-    pub cost_estimate: Option<f64>,
-    pub model_used: String,
+    pub token_count: Option<u32>,
+    pub model_used: Option<String>,
+    pub provider_used: Option<String>,
 }
 
 impl Conversation {
@@ -48,9 +48,9 @@ impl Conversation {
             metadata: ConversationMetadata {
                 title: None,
                 tags: Vec::new(),
-                token_count: 0,
-                cost_estimate: None,
-                model_used: "unknown".to_string(),
+                token_count: None,
+                model_used: None,
+                provider_used: None,
             },
         }
     }
@@ -58,108 +58,129 @@ impl Conversation {
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
         self.updated_at = Utc::now();
-        
-        // Auto-generate title from first user message
-        if self.metadata.title.is_none() && matches!(message.role, MessageRole::User) {
-            self.metadata.title = Some(self.generate_title(&message.content));
-        }
     }
 
-    pub fn get_recent_messages(&self, limit: usize) -> &[Message] {
-        let start = if self.messages.len() > limit {
-            self.messages.len() - limit
-        } else {
-            0
-        };
-        &self.messages[start..]
+    pub fn get_messages(&self) -> &[Message] {
+        &self.messages
     }
 
-    pub fn update_metadata(&mut self, token_count: u32, cost: Option<f64>, model: String) {
-        self.metadata.token_count += token_count;
-        if let Some(cost) = cost {
-            self.metadata.cost_estimate = Some(
-                self.metadata.cost_estimate.unwrap_or(0.0) + cost
-            );
-        }
-        self.metadata.model_used = model;
+    pub fn get_last_message(&self) -> Option<&Message> {
+        self.messages.last()
+    }
+
+    pub fn get_user_messages(&self) -> Vec<&Message> {
+        self.messages
+            .iter()
+            .filter(|msg| matches!(msg.role, MessageRole::User))
+            .collect()
+    }
+
+    pub fn get_assistant_messages(&self) -> Vec<&Message> {
+        self.messages
+            .iter()
+            .filter(|msg| matches!(msg.role, MessageRole::Assistant))
+            .collect()
+    }
+
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.updated_at = Utc::now();
+    }
+
+    pub fn update_metadata(&mut self, metadata: ConversationMetadata) {
+        self.metadata = metadata;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn set_title(&mut self, title: String) {
+        self.metadata.title = Some(title);
         self.updated_at = Utc::now();
     }
 
     pub fn add_tag(&mut self, tag: String) {
         if !self.metadata.tags.contains(&tag) {
             self.metadata.tags.push(tag);
+            self.updated_at = Utc::now();
         }
     }
 
-    pub fn set_title(&mut self, title: String) {
-        self.metadata.title = Some(title);
+    pub fn remove_tag(&mut self, tag: &str) {
+        self.metadata.tags.retain(|t| t != tag);
+        self.updated_at = Utc::now();
     }
 
-    fn generate_title(&self, content: &str) -> String {
-        // Generate a title from the first user message
-        let words: Vec<&str> = content.split_whitespace().take(6).collect();
-        let title = words.join(" ");
+    pub fn get_message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn get_token_estimate(&self) -> u32 {
+        // Simple token estimation (roughly 4 characters per token)
+        let total_chars: usize = self.messages
+            .iter()
+            .map(|msg| msg.content.len())
+            .sum();
         
-        if title.len() > 50 {
-            format!("{}...", &title[..47])
-        } else {
-            title
+        (total_chars / 4) as u32
+    }
+
+    pub fn truncate_to_limit(&mut self, max_messages: usize) {
+        if self.messages.len() > max_messages {
+            let start_index = self.messages.len() - max_messages;
+            self.messages = self.messages[start_index..].to_vec();
+            self.updated_at = Utc::now();
         }
     }
 
-    pub fn export_markdown(&self) -> String {
-        let mut markdown = String::new();
-        
-        // Header
-        markdown.push_str(&format!("# {}\n\n", 
-            self.metadata.title.as_deref().unwrap_or("Conversation")));
-        
-        markdown.push_str(&format!("**Created:** {}\n", 
-            self.created_at.format("%Y-%m-%d %H:%M:%S UTC")));
-        
-        markdown.push_str(&format!("**Model:** {}\n", self.metadata.model_used));
-        
-        if let Some(cost) = self.metadata.cost_estimate {
-            markdown.push_str(&format!("**Estimated Cost:** ${:.4}\n", cost));
+    pub fn export_to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn import_from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+impl Serialize for Conversation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Conversation", 6)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("system_prompt", &self.system_prompt)?;
+        state.serialize_field("messages", &self.messages)?;
+        state.serialize_field("created_at", &self.created_at)?;
+        state.serialize_field("updated_at", &self.updated_at)?;
+        state.serialize_field("metadata", &self.metadata)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Conversation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ConversationData {
+            id: Uuid,
+            system_prompt: String,
+            messages: Vec<Message>,
+            created_at: DateTime<Utc>,
+            updated_at: DateTime<Utc>,
+            metadata: ConversationMetadata,
         }
-        
-        markdown.push_str(&format!("**Tokens:** {}\n\n", self.metadata.token_count));
-        
-        // System prompt
-        if !self.system_prompt.is_empty() {
-            markdown.push_str("## System Prompt\n\n");
-            markdown.push_str(&format!("```\n{}\n```\n\n", self.system_prompt));
-        }
-        
-        // Messages
-        markdown.push_str("## Conversation\n\n");
-        
-        for message in &self.messages {
-            let role_emoji = match message.role {
-                MessageRole::User => "👤",
-                MessageRole::Assistant => "🤖",
-                MessageRole::System => "⚙️",
-            };
-            
-            markdown.push_str(&format!("### {} {:?}\n\n", role_emoji, message.role));
-            markdown.push_str(&format!("{}\n\n", message.content));
-            
-            if let Some(tool_calls) = &message.tool_calls {
-                if !tool_calls.is_empty() {
-                    markdown.push_str("**Tool Calls:**\n");
-                    for tool_call in tool_calls {
-                        markdown.push_str(&format!("- `{}`: {}\n", 
-                            tool_call.name, 
-                            serde_json::to_string_pretty(&tool_call.arguments).unwrap_or_default()));
-                    }
-                    markdown.push_str("\n");
-                }
-            }
-            
-            markdown.push_str("---\n\n");
-        }
-        
-        markdown
+
+        let data = ConversationData::deserialize(deserializer)?;
+        Ok(Conversation {
+            id: data.id,
+            system_prompt: data.system_prompt,
+            messages: data.messages,
+            created_at: data.created_at,
+            updated_at: data.updated_at,
+            metadata: data.metadata,
+        })
     }
 }
 
@@ -169,9 +190,11 @@ mod tests {
 
     #[test]
     fn test_conversation_creation() {
-        let conv = Conversation::new("Test system prompt".to_string());
-        assert_eq!(conv.system_prompt, "Test system prompt");
-        assert!(conv.messages.is_empty());
+        let system_prompt = "You are a helpful assistant".to_string();
+        let conv = Conversation::new(system_prompt.clone());
+        
+        assert_eq!(conv.system_prompt, system_prompt);
+        assert_eq!(conv.messages.len(), 0);
         assert!(conv.metadata.title.is_none());
     }
 
@@ -180,27 +203,67 @@ mod tests {
         let mut conv = Conversation::new("Test".to_string());
         let message = Message {
             role: MessageRole::User,
-            content: "Hello, world!".to_string(),
+            content: "Hello".to_string(),
             timestamp: Utc::now(),
             tool_calls: None,
         };
-        
+
         conv.add_message(message);
         assert_eq!(conv.messages.len(), 1);
-        assert!(conv.metadata.title.is_some());
+        assert_eq!(conv.messages[0].content, "Hello");
     }
 
     #[test]
-    fn test_title_generation() {
+    fn test_message_filtering() {
         let mut conv = Conversation::new("Test".to_string());
-        let message = Message {
+        
+        conv.add_message(Message {
             role: MessageRole::User,
-            content: "How do I list files in a directory?".to_string(),
+            content: "User message".to_string(),
             timestamp: Utc::now(),
             tool_calls: None,
-        };
+        });
+
+        conv.add_message(Message {
+            role: MessageRole::Assistant,
+            content: "Assistant message".to_string(),
+            timestamp: Utc::now(),
+            tool_calls: None,
+        });
+
+        let user_messages = conv.get_user_messages();
+        let assistant_messages = conv.get_assistant_messages();
+
+        assert_eq!(user_messages.len(), 1);
+        assert_eq!(assistant_messages.len(), 1);
+        assert_eq!(user_messages[0].content, "User message");
+        assert_eq!(assistant_messages[0].content, "Assistant message");
+    }
+
+    #[test]
+    fn test_token_estimation() {
+        let mut conv = Conversation::new("Test".to_string());
         
-        conv.add_message(message);
-        assert_eq!(conv.metadata.title.as_deref(), Some("How do I list files"));
+        conv.add_message(Message {
+            role: MessageRole::User,
+            content: "This is a test message with some content".to_string(), // ~40 chars = ~10 tokens
+            timestamp: Utc::now(),
+            tool_calls: None,
+        });
+
+        let estimated_tokens = conv.get_token_estimate();
+        assert!(estimated_tokens > 0);
+        assert!(estimated_tokens < 20); // Should be around 10 tokens
+    }
+
+    #[test]
+    fn test_conversation_serialization() {
+        let conv = Conversation::new("Test system prompt".to_string());
+        let json = conv.export_to_json().unwrap();
+        let deserialized = Conversation::import_from_json(&json).unwrap();
+        
+        assert_eq!(conv.id, deserialized.id);
+        assert_eq!(conv.system_prompt, deserialized.system_prompt);
+        assert_eq!(conv.messages.len(), deserialized.messages.len());
     }
 }

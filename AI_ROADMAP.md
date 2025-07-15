@@ -48,7 +48,7 @@
 
 # 📁 AI Module Directory Structure
 
-```plaintext
+\`\`\`plaintext
 src/ai/
 ├── mod.rs               # Top-level module file
 ├── assistant.rs         # suggest(), fix(), explain(), etc.

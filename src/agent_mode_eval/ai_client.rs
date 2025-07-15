@@ -10,6 +10,8 @@ pub enum AiProvider {
     Claude,
     Groq,
     Local,
+    Ollama,
+    Gemini,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +50,9 @@ pub struct StreamingResponse {
 
 impl AiClient {
     pub fn new(config: super::AgentConfig) -> Result<Self, AiClientError> {
+        // Validate model for provider
+        Self::validate_model_for_provider(&config.provider, &config.model)?;
+        
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -56,12 +61,49 @@ impl AiClient {
         Ok(Self { config, client })
     }
 
+    fn validate_model_for_provider(provider: &AiProvider, model: &str) -> Result<(), AiClientError> {
+        let valid_models = match provider {
+            AiProvider::OpenAI => vec![
+                "gpt-4o", "gpt-4", "gpt-4-turbo", "gpt-4-mini", 
+                "gpt-3.5-turbo", "gpt-3o", "o3", "o3-mini"
+            ],
+            AiProvider::Claude => vec![
+                "claude-4-sonnet-20250514", "claude-4-opus-20250514",
+                "claude-3-7-sonnet-20241022", "claude-3-5-sonnet-20241022", 
+                "claude-3-7-haiku-20241022"
+            ],
+            AiProvider::Gemini => vec![
+                "gemini-2.0-flash-exp", "gemini-2.0-pro-exp",
+                "gemini-1.5-pro", "gemini-1.5-flash"
+            ],
+            AiProvider::Ollama => vec![
+                "llama3.2", "llama3.1", "codellama", "mistral", 
+                "phi3", "qwen2.5", "deepseek-coder"
+            ],
+            AiProvider::Groq => vec![
+                "llama-3.1-70b-versatile", "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768", "gemma2-9b-it"
+            ],
+            AiProvider::Local => return Ok(()), // Local models can be anything
+        };
+
+        if !valid_models.contains(&model) {
+            return Err(AiClientError::ConfigError(
+                format!("Model '{}' is not supported for provider {:?}", model, provider)
+            ));
+        }
+
+        Ok(())
+    }
+
     pub async fn complete(&self, messages: Vec<AiMessage>, tools: Option<Vec<super::tools::Tool>>) -> Result<AiResponse, AiClientError> {
         match self.config.provider {
             AiProvider::OpenAI => self.openai_complete(messages, tools).await,
             AiProvider::Claude => self.claude_complete(messages, tools).await,
             AiProvider::Groq => self.groq_complete(messages, tools).await,
             AiProvider::Local => self.local_complete(messages, tools).await,
+            AiProvider::Ollama => self.ollama_complete(messages, tools).await,
+            AiProvider::Gemini => self.gemini_complete(messages, tools).await,
         }
     }
 
@@ -71,6 +113,8 @@ impl AiClient {
             AiProvider::Claude => self.claude_stream(messages, tools).await,
             AiProvider::Groq => self.groq_stream(messages, tools).await,
             AiProvider::Local => self.local_stream(messages, tools).await,
+            AiProvider::Ollama => self.ollama_stream(messages, tools).await,
+            AiProvider::Gemini => self.gemini_stream(messages, tools).await,
         }
     }
 
@@ -236,6 +280,87 @@ impl AiClient {
         })
     }
 
+    async fn gemini_complete(&self, messages: Vec<AiMessage>, _tools: Option<Vec<super::tools::Tool>>) -> Result<AiResponse, AiClientError> {
+        let api_key = self.config.api_key.as_ref()
+            .ok_or(AiClientError::MissingApiKey)?;
+
+        let url = format!(
+            "{}v1beta/models/{}:generateContent?key={}",
+            self.config.base_url.as_deref().unwrap_or("https://generativelanguage.googleapis.com/"),
+            self.config.model,
+            api_key
+        );
+
+        // Convert messages to Gemini format
+        let gemini_messages = self.convert_messages_for_gemini(messages);
+
+        let request_body = serde_json::json!({
+            "contents": gemini_messages,
+            "generationConfig": {
+                "temperature": self.config.temperature,
+                "maxOutputTokens": self.config.max_tokens.unwrap_or(4096)
+            }
+        });
+
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AiClientError::HttpError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(AiClientError::ApiError(format!("Gemini API error: {}", error_text)));
+        }
+
+        let response_json: serde_json::Value = response.json().await
+            .map_err(|e| AiClientError::ParseError(e.to_string()))?;
+
+        self.parse_gemini_response(response_json)
+    }
+
+    async fn ollama_complete(&self, messages: Vec<AiMessage>, _tools: Option<Vec<super::tools::Tool>>) -> Result<AiResponse, AiClientError> {
+        let url = format!(
+            "{}/api/chat",
+            self.config.base_url.as_deref().unwrap_or("http://localhost:11434")
+        );
+
+        let request_body = serde_json::json!({
+            "model": self.config.model,
+            "messages": messages,
+            "stream": false,
+            "options": {
+                "temperature": self.config.temperature,
+                "num_predict": self.config.max_tokens.unwrap_or(4096)
+            }
+        });
+
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AiClientError::HttpError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(AiClientError::ApiError(format!("Ollama API error: {}", error_text)));
+        }
+
+        let response_json: serde_json::Value = response.json().await
+            .map_err(|e| AiClientError::ParseError(e.to_string()))?;
+
+        Ok(AiResponse {
+            content: response_json["message"]["content"].as_str().unwrap_or("").to_string(),
+            tool_calls: None,
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        })
+    }
+
     async fn openai_stream(&self, messages: Vec<AiMessage>, tools: Option<Vec<super::tools::Tool>>) -> Result<BoxStream<'_, Result<StreamingResponse, AiClientError>>, AiClientError> {
         // Implementation for OpenAI streaming
         // This is a simplified version - real implementation would handle SSE parsing
@@ -270,6 +395,24 @@ impl AiClient {
     async fn local_stream(&self, messages: Vec<AiMessage>, tools: Option<Vec<super::tools::Tool>>) -> Result<BoxStream<'_, Result<StreamingResponse, AiClientError>>, AiClientError> {
         // Implementation for local model streaming
         let response = self.local_complete(messages, tools).await?;
+        let stream = tokio_stream::once(Ok(StreamingResponse {
+            content: response.content,
+            is_complete: true,
+        }));
+        Ok(Box::pin(stream))
+    }
+
+    async fn ollama_stream(&self, messages: Vec<AiMessage>, tools: Option<Vec<super::tools::Tool>>) -> Result<BoxStream<'_, Result<StreamingResponse, AiClientError>>, AiClientError> {
+        let response = self.ollama_complete(messages, tools).await?;
+        let stream = tokio_stream::once(Ok(StreamingResponse {
+            content: response.content,
+            is_complete: true,
+        }));
+        Ok(Box::pin(stream))
+    }
+
+    async fn gemini_stream(&self, messages: Vec<AiMessage>, tools: Option<Vec<super::tools::Tool>>) -> Result<BoxStream<'_, Result<StreamingResponse, AiClientError>>, AiClientError> {
+        let response = self.gemini_complete(messages, tools).await?;
         let stream = tokio_stream::once(Ok(StreamingResponse {
             content: response.content,
             is_complete: true,
@@ -337,6 +480,36 @@ impl AiClient {
 
         (system_message, claude_messages)
     }
+
+    fn convert_messages_for_gemini(&self, messages: Vec<AiMessage>) -> Vec<serde_json::Value> {
+        messages.into_iter()
+            .filter(|msg| msg.role != "system") // Gemini handles system messages differently
+            .map(|msg| {
+                serde_json::json!({
+                    "role": if msg.role == "assistant" { "model" } else { "user" },
+                    "parts": [{"text": msg.content}]
+                })
+            })
+            .collect()
+    }
+
+    fn parse_gemini_response(&self, response: serde_json::Value) -> Result<AiResponse, AiClientError> {
+        let content = response["candidates"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|candidate| candidate["content"]["parts"].as_array())
+            .and_then(|parts| parts.first())
+            .and_then(|part| part["text"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(AiResponse {
+            content,
+            tool_calls: None,
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -349,6 +522,8 @@ pub enum AiClientError {
     ApiError(String),
     #[error("Parse error: {0}")]
     ParseError(String),
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 }

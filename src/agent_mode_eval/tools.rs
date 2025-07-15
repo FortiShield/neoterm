@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
+use tokio::fs;
 use tokio::process::Command as AsyncCommand;
 
 #[derive(Debug, Clone)]
@@ -13,42 +14,40 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters: ToolParameters,
-    pub handler: ToolHandler,
+    pub function: ToolFunction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolParameters {
-    #[serde(rename = "type")]
-    pub param_type: String,
+    pub r#type: String,
     pub properties: HashMap<String, ParameterProperty>,
     pub required: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterProperty {
-    #[serde(rename = "type")]
-    pub prop_type: String,
+    pub r#type: String,
     pub description: String,
-    #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
-    pub enum_values: Option<Vec<String>>,
+    pub r#enum: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolHandler {
+pub enum ToolFunction {
     ExecuteCommand,
-    ListFiles,
     ReadFile,
     WriteFile,
-    SearchFiles,
+    ListDirectory,
     GetSystemInfo,
-    NetworkRequest,
+    SearchFiles,
+    GitStatus,
+    ProcessList,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    pub arguments: serde_json::Value,
+    pub arguments: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,127 +63,181 @@ impl ToolRegistry {
         let mut registry = Self {
             tools: HashMap::new(),
         };
-        
         registry.register_default_tools();
         registry
     }
 
     fn register_default_tools(&mut self) {
-        // Execute command tool
+        // Execute Command Tool
         self.register_tool(Tool {
             name: "execute_command".to_string(),
             description: "Execute a shell command and return the output".to_string(),
             parameters: ToolParameters {
-                param_type: "object".to_string(),
+                r#type: "object".to_string(),
                 properties: {
                     let mut props = HashMap::new();
                     props.insert("command".to_string(), ParameterProperty {
-                        prop_type: "string".to_string(),
+                        r#type: "string".to_string(),
                         description: "The shell command to execute".to_string(),
-                        enum_values: None,
+                        r#enum: None,
                     });
                     props.insert("working_directory".to_string(), ParameterProperty {
-                        prop_type: "string".to_string(),
-                        description: "Working directory for the command (optional)".to_string(),
-                        enum_values: None,
+                        r#type: "string".to_string(),
+                        description: "Optional working directory for the command".to_string(),
+                        r#enum: None,
                     });
                     props
                 },
                 required: vec!["command".to_string()],
             },
-            handler: ToolHandler::ExecuteCommand,
+            function: ToolFunction::ExecuteCommand,
         });
 
-        // List files tool
-        self.register_tool(Tool {
-            name: "list_files".to_string(),
-            description: "List files and directories in a given path".to_string(),
-            parameters: ToolParameters {
-                param_type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("path".to_string(), ParameterProperty {
-                        prop_type: "string".to_string(),
-                        description: "Path to list (defaults to current directory)".to_string(),
-                        enum_values: None,
-                    });
-                    props.insert("show_hidden".to_string(), ParameterProperty {
-                        prop_type: "boolean".to_string(),
-                        description: "Whether to show hidden files".to_string(),
-                        enum_values: None,
-                    });
-                    props
-                },
-                required: vec![],
-            },
-            handler: ToolHandler::ListFiles,
-        });
-
-        // Read file tool
+        // Read File Tool
         self.register_tool(Tool {
             name: "read_file".to_string(),
             description: "Read the contents of a file".to_string(),
             parameters: ToolParameters {
-                param_type: "object".to_string(),
+                r#type: "object".to_string(),
                 properties: {
                     let mut props = HashMap::new();
                     props.insert("path".to_string(), ParameterProperty {
-                        prop_type: "string".to_string(),
+                        r#type: "string".to_string(),
                         description: "Path to the file to read".to_string(),
-                        enum_values: None,
-                    });
-                    props.insert("max_lines".to_string(), ParameterProperty {
-                        prop_type: "integer".to_string(),
-                        description: "Maximum number of lines to read (optional)".to_string(),
-                        enum_values: None,
+                        r#enum: None,
                     });
                     props
                 },
                 required: vec!["path".to_string()],
             },
-            handler: ToolHandler::ReadFile,
+            function: ToolFunction::ReadFile,
         });
 
-        // Write file tool
+        // Write File Tool
         self.register_tool(Tool {
             name: "write_file".to_string(),
             description: "Write content to a file".to_string(),
             parameters: ToolParameters {
-                param_type: "object".to_string(),
+                r#type: "object".to_string(),
                 properties: {
                     let mut props = HashMap::new();
                     props.insert("path".to_string(), ParameterProperty {
-                        prop_type: "string".to_string(),
+                        r#type: "string".to_string(),
                         description: "Path to the file to write".to_string(),
-                        enum_values: None,
+                        r#enum: None,
                     });
                     props.insert("content".to_string(), ParameterProperty {
-                        prop_type: "string".to_string(),
+                        r#type: "string".to_string(),
                         description: "Content to write to the file".to_string(),
-                        enum_values: None,
-                    });
-                    props.insert("append".to_string(), ParameterProperty {
-                        prop_type: "boolean".to_string(),
-                        description: "Whether to append to the file instead of overwriting".to_string(),
-                        enum_values: None,
+                        r#enum: None,
                     });
                     props
                 },
                 required: vec!["path".to_string(), "content".to_string()],
             },
-            handler: ToolHandler::WriteFile,
+            function: ToolFunction::WriteFile,
         });
 
-        // Get system info tool
+        // List Directory Tool
+        self.register_tool(Tool {
+            name: "list_directory".to_string(),
+            description: "List contents of a directory".to_string(),
+            parameters: ToolParameters {
+                r#type: "object".to_string(),
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert("path".to_string(), ParameterProperty {
+                        r#type: "string".to_string(),
+                        description: "Path to the directory to list".to_string(),
+                        r#enum: None,
+                    });
+                    props.insert("show_hidden".to_string(), ParameterProperty {
+                        r#type: "boolean".to_string(),
+                        description: "Whether to show hidden files".to_string(),
+                        r#enum: None,
+                    });
+                    props
+                },
+                required: vec!["path".to_string()],
+            },
+            function: ToolFunction::ListDirectory,
+        });
+
+        // Get System Info Tool
         self.register_tool(Tool {
             name: "get_system_info".to_string(),
-            description: "Get system information like OS, architecture, etc.".to_string(),
+            description: "Get system information including OS, CPU, memory, etc.".to_string(),
             parameters: ToolParameters {
-                param_type: "object".to_string(),
+                r#type: "object".to_string(),
                 properties: HashMap::new(),
                 required: vec![],
             },
-            handler: ToolHandler::GetSystemInfo,
+            function: ToolFunction::GetSystemInfo,
+        });
+
+        // Search Files Tool
+        self.register_tool(Tool {
+            name: "search_files".to_string(),
+            description: "Search for files matching a pattern".to_string(),
+            parameters: ToolParameters {
+                r#type: "object".to_string(),
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert("pattern".to_string(), ParameterProperty {
+                        r#type: "string".to_string(),
+                        description: "Search pattern (glob or regex)".to_string(),
+                        r#enum: None,
+                    });
+                    props.insert("directory".to_string(), ParameterProperty {
+                        r#type: "string".to_string(),
+                        description: "Directory to search in (default: current)".to_string(),
+                        r#enum: None,
+                    });
+                    props
+                },
+                required: vec!["pattern".to_string()],
+            },
+            function: ToolFunction::SearchFiles,
+        });
+
+        // Git Status Tool
+        self.register_tool(Tool {
+            name: "git_status".to_string(),
+            description: "Get git repository status".to_string(),
+            parameters: ToolParameters {
+                r#type: "object".to_string(),
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert("repository_path".to_string(), ParameterProperty {
+                        r#type: "string".to_string(),
+                        description: "Path to git repository (default: current directory)".to_string(),
+                        r#enum: None,
+                    });
+                    props
+                },
+                required: vec![],
+            },
+            function: ToolFunction::GitStatus,
+        });
+
+        // Process List Tool
+        self.register_tool(Tool {
+            name: "process_list".to_string(),
+            description: "List running processes".to_string(),
+            parameters: ToolParameters {
+                r#type: "object".to_string(),
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert("filter".to_string(), ParameterProperty {
+                        r#type: "string".to_string(),
+                        description: "Optional filter for process names".to_string(),
+                        r#enum: None,
+                    });
+                    props
+                },
+                required: vec![],
+            },
+            function: ToolFunction::ProcessList,
         });
     }
 
@@ -192,21 +245,27 @@ impl ToolRegistry {
         self.tools.insert(tool.name.clone(), tool);
     }
 
+    pub fn get_tool(&self, name: &str) -> Option<&Tool> {
+        self.tools.get(name)
+    }
+
     pub fn get_available_tools(&self) -> Vec<Tool> {
         self.tools.values().cloned().collect()
     }
 
     pub async fn execute_tool(&self, tool_call: ToolCall) -> Result<ToolResult, ToolError> {
-        let tool = self.tools.get(&tool_call.name)
+        let tool = self.get_tool(&tool_call.name)
             .ok_or_else(|| ToolError::ToolNotFound(tool_call.name.clone()))?;
 
-        let result = match &tool.handler {
-            ToolHandler::ExecuteCommand => self.execute_command_tool(&tool_call).await,
-            ToolHandler::ListFiles => self.list_files_tool(&tool_call).await,
-            ToolHandler::ReadFile => self.read_file_tool(&tool_call).await,
-            ToolHandler::WriteFile => self.write_file_tool(&tool_call).await,
-            ToolHandler::GetSystemInfo => self.get_system_info_tool(&tool_call).await,
-            _ => Err(ToolError::NotImplemented(tool_call.name.clone())),
+        let result = match &tool.function {
+            ToolFunction::ExecuteCommand => self.execute_command_tool(&tool_call).await,
+            ToolFunction::ReadFile => self.read_file_tool(&tool_call).await,
+            ToolFunction::WriteFile => self.write_file_tool(&tool_call).await,
+            ToolFunction::ListDirectory => self.list_directory_tool(&tool_call).await,
+            ToolFunction::GetSystemInfo => self.get_system_info_tool(&tool_call).await,
+            ToolFunction::SearchFiles => self.search_files_tool(&tool_call).await,
+            ToolFunction::GitStatus => self.git_status_tool(&tool_call).await,
+            ToolFunction::ProcessList => self.process_list_tool(&tool_call).await,
         };
 
         match result {
@@ -226,24 +285,18 @@ impl ToolRegistry {
     }
 
     async fn execute_command_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
-        let command = tool_call.arguments["command"].as_str()
-            .ok_or(ToolError::InvalidArguments("Missing command".to_string()))?;
+        let command = tool_call.arguments.get("command")
+            .and_then(|v| v.as_str())
+            .ok_or(ToolError::MissingArgument("command".to_string()))?;
 
-        let working_dir = tool_call.arguments.get("working_directory")
+        let working_directory = tool_call.arguments.get("working_directory")
             .and_then(|v| v.as_str());
 
-        let mut cmd = if cfg!(target_os = "windows") {
-            let mut c = AsyncCommand::new("cmd");
-            c.args(["/C", command]);
-            c
-        } else {
-            let mut c = AsyncCommand::new("sh");
-            c.args(["-c", command]);
-            c
-        };
+        let mut cmd = AsyncCommand::new("sh");
+        cmd.arg("-c").arg(command);
 
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
+        if let Some(wd) = working_directory {
+            cmd.current_dir(wd);
         }
 
         let output = cmd.output().await
@@ -255,116 +308,175 @@ impl ToolRegistry {
         if output.status.success() {
             Ok(stdout.to_string())
         } else {
-            Ok(format!("Command failed with exit code {:?}\nStdout: {}\nStderr: {}", 
-                output.status.code(), stdout, stderr))
+            Err(ToolError::ExecutionError(format!("Command failed: {}", stderr)))
         }
     }
 
-    async fn list_files_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
+    async fn read_file_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
         let path = tool_call.arguments.get("path")
             .and_then(|v| v.as_str())
-            .unwrap_or(".");
+            .ok_or(ToolError::MissingArgument("path".to_string()))?;
+
+        fs::read_to_string(path).await
+            .map_err(|e| ToolError::IoError(e.to_string()))
+    }
+
+    async fn write_file_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
+        let path = tool_call.arguments.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or(ToolError::MissingArgument("path".to_string()))?;
+
+        let content = tool_call.arguments.get("content")
+            .and_then(|v| v.as_str())
+            .ok_or(ToolError::MissingArgument("content".to_string()))?;
+
+        fs::write(path, content).await
+            .map_err(|e| ToolError::IoError(e.to_string()))?;
+
+        Ok(format!("Successfully wrote {} bytes to {}", content.len(), path))
+    }
+
+    async fn list_directory_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
+        let path = tool_call.arguments.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or(ToolError::MissingArgument("path".to_string()))?;
 
         let show_hidden = tool_call.arguments.get("show_hidden")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let entries = std::fs::read_dir(path)
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+        let mut entries = fs::read_dir(path).await
+            .map_err(|e| ToolError::IoError(e.to_string()))?;
 
-        let mut files = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-            let name = entry.file_name().to_string_lossy().to_string();
+        let mut result = Vec::new();
+        while let Some(entry) = entries.next_entry().await
+            .map_err(|e| ToolError::IoError(e.to_string()))? {
             
-            if !show_hidden && name.starts_with('.') {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            
+            if !show_hidden && file_name.starts_with('.') {
                 continue;
             }
 
-            let metadata = entry.metadata()
-                .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-            
-            let file_type = if metadata.is_dir() { "dir" } else { "file" };
+            let metadata = entry.metadata().await
+                .map_err(|e| ToolError::IoError(e.to_string()))?;
+
+            let file_type = if metadata.is_dir() { "DIR" } else { "FILE" };
             let size = if metadata.is_file() { 
                 format!(" ({}B)", metadata.len()) 
             } else { 
                 String::new() 
             };
 
-            files.push(format!("{} [{}]{}", name, file_type, size));
+            result.push(format!("{} {}{}", file_type, file_name, size));
         }
 
-        files.sort();
-        Ok(files.join("\n"))
-    }
-
-    async fn read_file_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
-        let path = tool_call.arguments["path"].as_str()
-            .ok_or(ToolError::InvalidArguments("Missing path".to_string()))?;
-
-        let max_lines = tool_call.arguments.get("max_lines")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize);
-
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-
-        if let Some(max) = max_lines {
-            let lines: Vec<&str> = content.lines().take(max).collect();
-            let result = lines.join("\n");
-            if content.lines().count() > max {
-                Ok(format!("{}\n... (truncated, showing first {} lines)", result, max))
-            } else {
-                Ok(result)
-            }
-        } else {
-            Ok(content)
-        }
-    }
-
-    async fn write_file_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
-        let path = tool_call.arguments["path"].as_str()
-            .ok_or(ToolError::InvalidArguments("Missing path".to_string()))?;
-
-        let content = tool_call.arguments["content"].as_str()
-            .ok_or(ToolError::InvalidArguments("Missing content".to_string()))?;
-
-        let append = tool_call.arguments.get("append")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        if append {
-            std::fs::write(path, format!("{}\n{}", 
-                std::fs::read_to_string(path).unwrap_or_default(), content))
-                .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-        } else {
-            std::fs::write(path, content)
-                .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
-        }
-
-        Ok(format!("Successfully {} {} bytes to {}", 
-            if append { "appended" } else { "wrote" }, 
-            content.len(), 
-            path))
+        Ok(result.join("\n"))
     }
 
     async fn get_system_info_tool(&self, _tool_call: &ToolCall) -> Result<String, ToolError> {
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
-        let family = std::env::consts::FAMILY;
+        let mut info = Vec::new();
         
-        let current_dir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+        // OS Info
+        info.push(format!("OS: {}", std::env::consts::OS));
+        info.push(format!("Architecture: {}", std::env::consts::ARCH));
+        
+        // Current directory
+        if let Ok(current_dir) = std::env::current_dir() {
+            info.push(format!("Current Directory: {}", current_dir.display()));
+        }
 
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
+        // Environment variables (selected)
+        if let Ok(user) = std::env::var("USER") {
+            info.push(format!("User: {}", user));
+        }
+        if let Ok(shell) = std::env::var("SHELL") {
+            info.push(format!("Shell: {}", shell));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            info.push(format!("Home: {}", home));
+        }
 
-        Ok(format!(
-            "OS: {}\nArchitecture: {}\nFamily: {}\nCurrent Directory: {}\nUser: {}",
-            os, arch, family, current_dir, user
-        ))
+        Ok(info.join("\n"))
+    }
+
+    async fn search_files_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
+        let pattern = tool_call.arguments.get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or(ToolError::MissingArgument("pattern".to_string()))?;
+
+        let directory = tool_call.arguments.get("directory")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let output = AsyncCommand::new("find")
+            .arg(directory)
+            .arg("-name")
+            .arg(pattern)
+            .output()
+            .await
+            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(ToolError::ExecutionError(
+                String::from_utf8_lossy(&output.stderr).to_string()
+            ))
+        }
+    }
+
+    async fn git_status_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
+        let repo_path = tool_call.arguments.get("repository_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let mut cmd = AsyncCommand::new("git");
+        cmd.arg("status").arg("--porcelain").current_dir(repo_path);
+
+        let output = cmd.output().await
+            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+        if output.status.success() {
+            let status = String::from_utf8_lossy(&output.stdout);
+            if status.trim().is_empty() {
+                Ok("Repository is clean".to_string())
+            } else {
+                Ok(status.to_string())
+            }
+        } else {
+            Err(ToolError::ExecutionError(
+                String::from_utf8_lossy(&output.stderr).to_string()
+            ))
+        }
+    }
+
+    async fn process_list_tool(&self, tool_call: &ToolCall) -> Result<String, ToolError> {
+        let filter = tool_call.arguments.get("filter")
+            .and_then(|v| v.as_str());
+
+        let mut cmd = AsyncCommand::new("ps");
+        cmd.arg("aux");
+
+        let output = cmd.output().await
+            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+        if output.status.success() {
+            let mut result = String::from_utf8_lossy(&output.stdout).to_string();
+            
+            if let Some(filter_term) = filter {
+                let lines: Vec<&str> = result.lines()
+                    .filter(|line| line.contains(filter_term))
+                    .collect();
+                result = lines.join("\n");
+            }
+
+            Ok(result)
+        } else {
+            Err(ToolError::ExecutionError(
+                String::from_utf8_lossy(&output.stderr).to_string()
+            ))
+        }
     }
 }
 
@@ -372,12 +484,14 @@ impl ToolRegistry {
 pub enum ToolError {
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
-    #[error("Invalid arguments: {0}")]
-    InvalidArguments(String),
+    #[error("Missing required argument: {0}")]
+    MissingArgument(String),
     #[error("Execution error: {0}")]
     ExecutionError(String),
-    #[error("Tool not implemented: {0}")]
-    NotImplemented(String),
+    #[error("IO error: {0}")]
+    IoError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
 }
 
 #[cfg(test)]
@@ -388,21 +502,43 @@ mod tests {
     fn test_tool_registry_creation() {
         let registry = ToolRegistry::new();
         assert!(!registry.tools.is_empty());
-        assert!(registry.tools.contains_key("execute_command"));
-        assert!(registry.tools.contains_key("list_files"));
+        assert!(registry.get_tool("execute_command").is_some());
+        assert!(registry.get_tool("read_file").is_some());
+    }
+
+    #[test]
+    fn test_tool_registration() {
+        let mut registry = ToolRegistry::new();
+        let initial_count = registry.tools.len();
+
+        let custom_tool = Tool {
+            name: "custom_tool".to_string(),
+            description: "A custom tool".to_string(),
+            parameters: ToolParameters {
+                r#type: "object".to_string(),
+                properties: HashMap::new(),
+                required: vec![],
+            },
+            function: ToolFunction::GetSystemInfo,
+        };
+
+        registry.register_tool(custom_tool);
+        assert_eq!(registry.tools.len(), initial_count + 1);
+        assert!(registry.get_tool("custom_tool").is_some());
     }
 
     #[tokio::test]
     async fn test_system_info_tool() {
         let registry = ToolRegistry::new();
         let tool_call = ToolCall {
-            id: "test".to_string(),
+            id: "test_id".to_string(),
             name: "get_system_info".to_string(),
-            arguments: serde_json::json!({}),
+            arguments: HashMap::new(),
         };
 
         let result = registry.execute_tool(tool_call).await.unwrap();
         assert!(result.success);
         assert!(result.output.contains("OS:"));
+        assert!(result.output.contains("Architecture:"));
     }
 }
