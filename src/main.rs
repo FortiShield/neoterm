@@ -13,6 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     Terminal,
 };
+use std::io; // Added for terminal setup
 
 mod block;
 mod shell;
@@ -41,6 +42,11 @@ mod plugins;
 mod collaboration;
 mod cloud;
 mod performance;
+mod sum_tree; // Added missing module import
+mod workflows; // Added missing module import
+mod lpc; // Added missing module import
+mod mcq; // Added missing module import
+mod markdown_parser; // Added missing module import
 
 use block::{Block, BlockContent};
 use shell::ShellManager;
@@ -188,8 +194,14 @@ impl Application for NeoTerm {
                         self.blocks.push(block);
                         self.current_input.clear();
                         
+                        // Get active environment profile variables
+                        let env_vars = self.config.env_profiles.active_profile
+                            .as_ref()
+                            .and_then(|name| self.config.env_profiles.profiles.get(name))
+                            .map(|profile| profile.variables.clone());
+
                         Command::perform(
-                            self.shell_manager.execute_command(command),
+                            self.shell_manager.execute_command(command, env_vars), // Pass env_vars
                             |(output, exit_code)| Message::CommandOutput(output, exit_code)
                         )
                     }
@@ -413,7 +425,11 @@ impl NeoTerm {
         let settings_button = button(text("⚙️ Settings"))
             .on_press(Message::ToggleSettings);
 
-        row![agent_button, settings_button]
+        // Display active environment profile
+        let active_profile_name = self.config.env_profiles.active_profile.as_deref().unwrap_or("None");
+        let env_profile_indicator = text(format!("Env: {}", active_profile_name)).size(14);
+
+        row![agent_button, settings_button, env_profile_indicator]
             .spacing(8)
             .into()
     }
@@ -464,8 +480,14 @@ impl NeoTerm {
                     match &block.content {
                         BlockContent::Command { input, .. } => {
                             let command = input.clone();
+                            // Get active environment profile variables for rerun
+                            let env_vars = self.config.env_profiles.active_profile
+                                .as_ref()
+                                .and_then(|name| self.config.env_profiles.profiles.get(name))
+                                .map(|profile| profile.variables.clone());
+
                             Command::perform(
-                                self.shell_manager.execute_command(command),
+                                self.shell_manager.execute_command(command, env_vars), // Pass env_vars
                                 |(output, exit_code)| Message::CommandOutput(output, exit_code)
                             )
                         }
@@ -512,10 +534,12 @@ struct App {
     sync_manager: Option<CloudSyncManager>,
     input_buffer: String,
     should_quit: bool,
+    config: AppConfig, // Added AppConfig to App struct
 }
 
 impl App {
     fn new() -> Self {
+        let config = AppConfig::load().unwrap_or_default(); // Load config here
         Self {
             mode: AppMode::Normal,
             block_renderer: CollapsibleBlockRenderer::new(),
@@ -528,6 +552,7 @@ impl App {
             sync_manager: None,
             input_buffer: String::new(),
             should_quit: false,
+            config, // Initialize config
         }
     }
 
@@ -615,7 +640,7 @@ impl App {
         // Render command palette if open
         self.command_palette.render(f, size);
 
-        // Show mode indicator
+        // Show mode indicator and active environment profile
         let mode_text = match self.mode {
             AppMode::Normal => "NORMAL",
             AppMode::CommandPalette => "COMMAND",
@@ -624,18 +649,21 @@ impl App {
             AppMode::Settings => "SETTINGS",
         };
 
-        let mode_paragraph = ratatui::widgets::Paragraph::new(mode_text)
+        let active_profile_name = self.config.env_profiles.active_profile.as_deref().unwrap_or("None");
+        let status_text = format!("{} | Env: {}", mode_text, active_profile_name);
+
+        let status_paragraph = ratatui::widgets::Paragraph::new(status_text)
             .style(ratatui::style::Style::default().fg(ratatui::style::Color::Yellow))
             .alignment(ratatui::layout::Alignment::Right);
         
-        let mode_area = ratatui::layout::Rect {
-            x: size.width.saturating_sub(10),
+        let status_area = ratatui::layout::Rect {
+            x: size.width.saturating_sub(status_text.len() as u16),
             y: 0,
-            width: 10,
+            width: status_text.len() as u16,
             height: 1,
         };
         
-        f.render_widget(mode_paragraph, mode_area);
+        f.render_widget(status_paragraph, status_area);
     }
 
     async fn handle_normal_mode_input(&mut self, key: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
@@ -754,8 +782,14 @@ impl App {
         let cmd = parts[0];
         let args = parts[1..].to_vec();
 
+        // Get active environment profile variables
+        let env_vars = self.config.env_profiles.active_profile
+            .as_ref()
+            .and_then(|name| self.config.env_profiles.profiles.get(name))
+            .map(|profile| profile.variables.clone());
+
         // Execute command via PTY
-        let mut output_receiver = self.pty_manager.execute_command(cmd, args, None).await?;
+        let mut output_receiver = self.pty_manager.execute_command(cmd, args, env_vars).await?;
         
         let mut output_block = CollapsibleBlock::new(
             "Output".to_string(),

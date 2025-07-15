@@ -9,6 +9,7 @@ pub struct UserPreferences {
     pub ui: UiPreferences,
     pub performance: PerformancePreferences,
     pub privacy: PrivacyPreferences,
+    pub environment_profiles: EnvironmentProfiles,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +204,18 @@ pub struct PluginConfig {
     pub allow_unsigned_plugins: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentProfiles {
+    pub profiles: HashMap<String, EnvironmentProfile>,
+    pub active_profile: Option<String>, // Name of the currently active profile
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentProfile {
+    pub name: String,
+    pub variables: HashMap<String, String>,
+}
+
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
@@ -212,6 +225,7 @@ impl Default for UserPreferences {
             ui: UiPreferences::default(),
             performance: PerformancePreferences::default(),
             privacy: PrivacyPreferences::default(),
+            environment_profiles: EnvironmentProfiles::default(),
         }
     }
 }
@@ -391,6 +405,32 @@ impl Default for PluginConfig {
             plugin_settings: HashMap::new(),
             auto_update_plugins: true,
             allow_unsigned_plugins: false,
+        }
+    }
+}
+
+impl Default for EnvironmentProfiles {
+    fn default() -> Self {
+        let mut profiles = HashMap::new();
+        
+        // Add a default "Base" profile
+        profiles.insert("Base".to_string(), EnvironmentProfile {
+            name: "Base".to_string(),
+            variables: HashMap::new(), // Empty for base, will inherit system env
+        });
+
+        // Add a sample "Development" profile
+        let mut dev_vars = HashMap::new();
+        dev_vars.insert("NODE_ENV".to_string(), "development".to_string());
+        dev_vars.insert("DEBUG_MODE".to_string(), "true".to_string());
+        profiles.insert("Development".to_string(), EnvironmentProfile {
+            name: "Development".to_string(),
+            variables: dev_vars,
+        });
+
+        Self {
+            profiles,
+            active_profile: Some("Base".to_string()), // Set "Base" as default active
         }
     }
 }

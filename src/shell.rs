@@ -14,7 +14,7 @@ pub struct ShellManager {
 pub struct ShellSession {
     id: Uuid,
     working_dir: std::path::PathBuf,
-    environment: HashMap<String, String>,
+    environment: HashMap<String, String>, // Environment variables for this session
 }
 
 impl ShellManager {
@@ -25,12 +25,17 @@ impl ShellManager {
         }
     }
 
-    pub async fn execute_command(&self, command: String) -> (String, i32) {
+    pub async fn execute_command(&self, command: String, env_vars: Option<HashMap<String, String>>) -> (String, i32) {
         let mut cmd = Command::new(&self.default_shell);
         cmd.arg("-c")
            .arg(&command)
            .stdout(Stdio::piped())
            .stderr(Stdio::piped());
+
+        // Apply environment variables if provided
+        if let Some(vars) = env_vars {
+            cmd.envs(vars);
+        }
 
         match cmd.spawn() {
             Ok(mut child) => {
@@ -77,7 +82,7 @@ impl ShellManager {
         }
     }
 
-    pub async fn execute_interactive_command(&mut self, command: String) -> tokio::sync::mpsc::Receiver<String> {
+    pub async fn execute_interactive_command(&mut self, command: String, env_vars: Option<HashMap<String, String>>) -> tokio::sync::mpsc::Receiver<String> {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         
         let shell = self.default_shell.clone();
@@ -87,6 +92,11 @@ impl ShellManager {
                .arg(command)
                .stdout(Stdio::piped())
                .stderr(Stdio::piped());
+
+            // Apply environment variables if provided
+            if let Some(vars) = env_vars {
+                cmd.envs(vars);
+            }
 
             if let Ok(mut child) = cmd.spawn() {
                 if let Some(stdout) = child.stdout.take() {
@@ -118,11 +128,16 @@ impl ShellManager {
             })
     }
 
-    pub fn create_session(&mut self) -> Uuid {
+    pub fn create_session(&mut self, initial_env: Option<HashMap<String, String>>) -> Uuid {
+        let mut environment = std::env::vars().collect::<HashMap<String, String>>();
+        if let Some(initial_vars) = initial_env {
+            environment.extend(initial_vars);
+        }
+
         let session = ShellSession {
             id: Uuid::new_v4(),
             working_dir: std::env::current_dir().unwrap_or_default(),
-            environment: std::env::vars().collect(),
+            environment,
         };
         
         let id = session.id;

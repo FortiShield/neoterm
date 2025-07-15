@@ -25,6 +25,9 @@ pub struct AppConfig {
     // YAML theme settings
     pub yaml_themes_enabled: bool,
     pub active_yaml_theme: Option<String>,
+
+    // Environment profiles
+    pub env_profiles: EnvironmentProfiles, // Added for environment profiles
 }
 
 impl Default for AppConfig {
@@ -36,6 +39,7 @@ impl Default for AppConfig {
             plugins: PluginConfig::default(),
             yaml_themes_enabled: true,
             active_yaml_theme: None,
+            env_profiles: EnvironmentProfiles::default(), // Initialize default environment profiles
         }
     }
 }
