@@ -1,150 +1,56 @@
-use std::process::Stdio;
-use tokio::process::Command;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use std::collections::HashMap;
-use uuid::Uuid;
+use std::process::{Command, Stdio};
+use std::io::{self, Write, Read};
+use std::thread;
 
-#[derive(Debug, Clone)]
 pub struct ShellManager {
-    active_sessions: HashMap<Uuid, ShellSession>,
-    default_shell: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShellSession {
-    id: Uuid,
-    working_dir: std::path::PathBuf,
-    environment: HashMap<String, String>,
+    // In a real application, this would manage active shell sessions (e.g., using portable-pty)
 }
 
 impl ShellManager {
     pub fn new() -> Self {
-        Self {
-            active_sessions: HashMap::new(),
-            default_shell: Self::detect_shell(),
-        }
+        Self {}
     }
 
-    pub async fn execute_command(&self, command: String) -> (String, i32) {
-        let mut cmd = Command::new(&self.default_shell);
-        cmd.arg("-c")
-           .arg(&command)
-           .stdout(Stdio::piped())
-           .stderr(Stdio::piped());
-
-        match cmd.spawn() {
-            Ok(mut child) => {
-                let stdout = child.stdout.take().unwrap();
-                let stderr = child.stderr.take().unwrap();
-
-                let stdout_reader = BufReader::new(stdout);
-                let stderr_reader = BufReader::new(stderr);
-
-                let mut output = String::new();
-                let mut error_output = String::new();
-
-                // Read stdout
-                let mut stdout_lines = stdout_reader.lines();
-                while let Ok(Some(line)) = stdout_lines.next_line().await {
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-
-                // Read stderr
-                let mut stderr_lines = stderr_reader.lines();
-                while let Ok(Some(line)) = stderr_lines.next_line().await {
-                    error_output.push_str(&line);
-                    error_output.push('\n');
-                }
-
-                let exit_status = child.wait().await.unwrap_or_else(|_| {
-                    std::process::ExitStatus::from_raw(1)
-                });
-
-                let exit_code = exit_status.code().unwrap_or(1);
-                
-                let combined_output = if !error_output.is_empty() {
-                    format!("{}\n{}", output, error_output)
-                } else {
-                    output
-                };
-
-                (combined_output, exit_code)
-            }
-            Err(e) => {
-                (format!("Failed to execute command: {}", e), 1)
-            }
-        }
-    }
-
-    pub async fn execute_interactive_command(&mut self, command: String) -> tokio::sync::mpsc::Receiver<String> {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-        
-        let shell = self.default_shell.clone();
-        tokio::spawn(async move {
-            let mut cmd = Command::new(shell);
-            cmd.arg("-c")
-               .arg(command)
-               .stdout(Stdio::piped())
-               .stderr(Stdio::piped());
-
-            if let Ok(mut child) = cmd.spawn() {
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                
-                let _ = child.wait().await;
-            }
-        });
-
-        rx
-    }
-
-    fn detect_shell() -> String {
-        std::env::var("SHELL")
-            .unwrap_or_else(|_| {
-                if cfg!(windows) {
-                    "cmd".to_string()
-                } else {
-                    "/bin/sh".to_string()
-                }
-            })
-    }
-
-    pub fn create_session(&mut self) -> Uuid {
-        let session = ShellSession {
-            id: Uuid::new_v4(),
-            working_dir: std::env::current_dir().unwrap_or_default(),
-            environment: std::env::vars().collect(),
+    // This is a simplified execute_command for demonstration.
+    // The actual PTY-based execution is handled in src/command/pty.rs
+    pub fn execute_command_sync(&self, command: &str) -> io::Result<String> {
+        let mut child = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .arg("/C")
+                .arg(command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?
+        } else {
+            Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?
         };
-        
-        let id = session.id;
-        self.active_sessions.insert(id, session);
-        id
-    }
 
-    pub fn get_session(&self, id: &Uuid) -> Option<&ShellSession> {
-        self.active_sessions.get(id)
-    }
-}
+        let mut stdout_output = String::new();
+        let mut stderr_output = String::new();
 
-impl ShellSession {
-    pub fn set_working_dir(&mut self, path: std::path::PathBuf) {
-        self.working_dir = path;
-    }
+        if let Some(stdout) = child.stdout.take() {
+            let mut reader = io::BufReader::new(stdout);
+            reader.read_to_string(&mut stdout_output)?;
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let mut reader = io::BufReader::new(stderr);
+            reader.read_to_string(&mut stderr_output)?;
+        }
 
-    pub fn set_env_var(&mut self, key: String, value: String) {
-        self.environment.insert(key, value);
-    }
+        let status = child.wait()?;
 
-    pub fn get_working_dir(&self) -> &std::path::PathBuf {
-        &self.working_dir
+        if status.success() {
+            Ok(stdout_output)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Command failed with exit code {:?}: {}", status.code(), stderr_output),
+            ))
+        }
     }
 }

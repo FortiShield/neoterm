@@ -2,6 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use iced::advanced::graphics::text;
 use uuid::Uuid;
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::ThemeSet;
+use syntect::easy::HighlightLines;
+use syntect::util::as_24_bit_terminal_escaped;
+use wgpu;
 
 /// GPU-accelerated renderer for terminal blocks
 pub struct BlockRenderer {
@@ -48,7 +53,7 @@ impl BlockRenderer {
         };
 
         // Create paragraph with syntax highlighting
-        let paragraph = Arc::new(text::Paragraph::new());
+        let paragraph = Arc::new(text::Paragraph::new(highlighted));
         self.text_cache.insert(cache_key, paragraph.clone());
         
         paragraph
@@ -64,15 +69,15 @@ impl BlockRenderer {
 }
 
 pub struct SyntaxHighlighter {
-    syntax_set: syntect::parsing::SyntaxSet,
-    theme_set: syntect::highlighting::ThemeSet,
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
 }
 
 impl SyntaxHighlighter {
     pub fn new() -> Self {
         Self {
-            syntax_set: syntect::parsing::SyntaxSet::load_defaults_newlines(),
-            theme_set: syntect::highlighting::ThemeSet::load_defaults(),
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
         }
     }
 
@@ -84,11 +89,11 @@ impl SyntaxHighlighter {
 
         let theme = &self.theme_set.themes["base16-ocean.dark"];
         
-        let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
+        let mut highlighter = HighlightLines::new(syntax, theme);
         let ranges = highlighter.highlight_line(text, &self.syntax_set).unwrap();
         
         // Convert to styled text - in a real implementation, you'd convert to Iced's styled text
-        syntect::util::as_24_bit_terminal_escaped(&ranges[..], false)
+        as_24_bit_terminal_escaped(&ranges[..], false)
     }
 }
 
@@ -186,3 +191,7 @@ impl PerformanceMonitor {
         }
     }
 }
+
+// This module would contain the core rendering logic for the terminal display.
+// Given the use of Iced and Ratatui, this might be an abstraction layer.
+// For now, it's a placeholder.

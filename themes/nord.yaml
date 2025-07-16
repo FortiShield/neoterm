@@ -4,10 +4,19 @@ description: "An arctic, north-bluish color palette"
 accent: "#88c0d0"
 background: "#2e3440"
 details: "darker"
-foreground: "#d8dee9"
+foreground: "#eceff4"
 cursor: "#d8dee9"
 selection: "#4c566a"
-border: "#3b4252"
+border: "#4c566a"
+
+colors:
+  background: "#2e3440"
+  foreground: "#eceff4"
+  primary: "#88c0d0"
+  secondary: "#81a1c1"
+  danger: "#bf616a"
+  text: "#eceff4"
+  border: "#4c566a"
 
 terminal_colors:
   normal:
@@ -30,8 +39,8 @@ terminal_colors:
     white: "#eceff4"
 
 ui_colors:
-  primary: "#5e81ac"
-  secondary: "#4c566a"
+  primary: "#88c0d0"
+  secondary: "#81a1c1"
   success: "#a3be8c"
   warning: "#ebcb8b"
   error: "#bf616a"

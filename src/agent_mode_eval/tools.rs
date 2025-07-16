@@ -3,51 +3,24 @@ use std::collections::HashMap;
 use std::process::Command;
 use tokio::fs;
 use tokio::process::Command as AsyncCommand;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Tool>,
+    tools: HashMap<String, ToolDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tool {
+pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    pub parameters: ToolParameters,
-    pub function: ToolFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolParameters {
-    pub r#type: String,
-    pub properties: HashMap<String, ParameterProperty>,
-    pub required: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParameterProperty {
-    pub r#type: String,
-    pub description: String,
-    pub r#enum: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolFunction {
-    ExecuteCommand,
-    ReadFile,
-    WriteFile,
-    ListDirectory,
-    GetSystemInfo,
-    SearchFiles,
-    GitStatus,
-    ProcessList,
+    pub parameters: serde_json::Value, // JSON Schema for parameters
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    pub id: String,
     pub name: String,
-    pub arguments: HashMap<String, serde_json::Value>,
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +29,20 @@ pub struct ToolResult {
     pub success: bool,
     pub output: String,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum ToolError {
+    #[error("Tool not found: {0}")]
+    ToolNotFound(String),
+    #[error("Missing required argument: {0}")]
+    MissingArgument(String),
+    #[error("Execution error: {0}")]
+    ExecutionError(String),
+    #[error("IO error: {0}")]
+    IoError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
 }
 
 impl ToolRegistry {
@@ -69,187 +56,151 @@ impl ToolRegistry {
 
     fn register_default_tools(&mut self) {
         // Execute Command Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "execute_command".to_string(),
-            description: "Execute a shell command and return the output".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("command".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "The shell command to execute".to_string(),
-                        r#enum: None,
-                    });
-                    props.insert("working_directory".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Optional working directory for the command".to_string(),
-                        r#enum: None,
-                    });
-                    props
+            description: "Executes a shell command and returns its output.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute."
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": "Optional working directory for the command."
+                    }
                 },
-                required: vec!["command".to_string()],
-            },
-            function: ToolFunction::ExecuteCommand,
+                "required": ["command"]
+            }),
         });
 
         // Read File Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "read_file".to_string(),
-            description: "Read the contents of a file".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("path".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Path to the file to read".to_string(),
-                        r#enum: None,
-                    });
-                    props
+            description: "Reads the content of a file.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file."
+                    }
                 },
-                required: vec!["path".to_string()],
-            },
-            function: ToolFunction::ReadFile,
+                "required": ["path"]
+            }),
         });
 
         // Write File Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "write_file".to_string(),
-            description: "Write content to a file".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("path".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Path to the file to write".to_string(),
-                        r#enum: None,
-                    });
-                    props.insert("content".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Content to write to the file".to_string(),
-                        r#enum: None,
-                    });
-                    props
+            description: "Writes content to a file.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write to the file."
+                    }
                 },
-                required: vec!["path".to_string(), "content".to_string()],
-            },
-            function: ToolFunction::WriteFile,
+                "required": ["path", "content"]
+            }),
         });
 
         // List Directory Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "list_directory".to_string(),
-            description: "List contents of a directory".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("path".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Path to the directory to list".to_string(),
-                        r#enum: None,
-                    });
-                    props.insert("show_hidden".to_string(), ParameterProperty {
-                        r#type: "boolean".to_string(),
-                        description: "Whether to show hidden files".to_string(),
-                        r#enum: None,
-                    });
-                    props
+            description: "Lists contents of a directory.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the directory to list."
+                    },
+                    "show_hidden": {
+                        "type": "boolean",
+                        "description": "Whether to show hidden files."
+                    }
                 },
-                required: vec!["path".to_string()],
-            },
-            function: ToolFunction::ListDirectory,
+                "required": ["path"]
+            }),
         });
 
         // Get System Info Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "get_system_info".to_string(),
-            description: "Get system information including OS, CPU, memory, etc.".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: HashMap::new(),
-                required: vec![],
-            },
-            function: ToolFunction::GetSystemInfo,
+            description: "Gets system information including OS, CPU, memory, etc.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
         });
 
         // Search Files Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "search_files".to_string(),
-            description: "Search for files matching a pattern".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("pattern".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Search pattern (glob or regex)".to_string(),
-                        r#enum: None,
-                    });
-                    props.insert("directory".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Directory to search in (default: current)".to_string(),
-                        r#enum: None,
-                    });
-                    props
+            description: "Searches for files matching a pattern.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (glob or regex)."
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "Directory to search in (default: current)."
+                    }
                 },
-                required: vec!["pattern".to_string()],
-            },
-            function: ToolFunction::SearchFiles,
+                "required": ["pattern"]
+            }),
         });
 
         // Git Status Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "git_status".to_string(),
-            description: "Get git repository status".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("repository_path".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Path to git repository (default: current directory)".to_string(),
-                        r#enum: None,
-                    });
-                    props
-                },
-                required: vec![],
-            },
-            function: ToolFunction::GitStatus,
+            description: "Gets git repository status.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "repository_path": {
+                        "type": "string",
+                        "description": "Path to git repository (default: current directory)."
+                    }
+                }
+            }),
         });
 
         // Process List Tool
-        self.register_tool(Tool {
+        self.register_tool(ToolDefinition {
             name: "process_list".to_string(),
-            description: "List running processes".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: {
-                    let mut props = HashMap::new();
-                    props.insert("filter".to_string(), ParameterProperty {
-                        r#type: "string".to_string(),
-                        description: "Optional filter for process names".to_string(),
-                        r#enum: None,
-                    });
-                    props
-                },
-                required: vec![],
-            },
-            function: ToolFunction::ProcessList,
+            description: "Lists running processes.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "description": "Optional filter for process names."
+                    }
+                }
+            }),
         });
     }
 
-    pub fn register_tool(&mut self, tool: Tool) {
+    pub fn register_tool(&mut self, tool: ToolDefinition) {
         self.tools.insert(tool.name.clone(), tool);
     }
 
-    pub fn get_tool(&self, name: &str) -> Option<&Tool> {
+    pub fn get_tool(&self, name: &str) -> Option<&ToolDefinition> {
         self.tools.get(name)
     }
 
-    pub fn get_available_tools(&self) -> Vec<Tool> {
+    pub fn get_available_tools(&self) -> Vec<ToolDefinition> {
         self.tools.values().cloned().collect()
     }
 
@@ -257,26 +208,27 @@ impl ToolRegistry {
         let tool = self.get_tool(&tool_call.name)
             .ok_or_else(|| ToolError::ToolNotFound(tool_call.name.clone()))?;
 
-        let result = match &tool.function {
-            ToolFunction::ExecuteCommand => self.execute_command_tool(&tool_call).await,
-            ToolFunction::ReadFile => self.read_file_tool(&tool_call).await,
-            ToolFunction::WriteFile => self.write_file_tool(&tool_call).await,
-            ToolFunction::ListDirectory => self.list_directory_tool(&tool_call).await,
-            ToolFunction::GetSystemInfo => self.get_system_info_tool(&tool_call).await,
-            ToolFunction::SearchFiles => self.search_files_tool(&tool_call).await,
-            ToolFunction::GitStatus => self.git_status_tool(&tool_call).await,
-            ToolFunction::ProcessList => self.process_list_tool(&tool_call).await,
+        let result = match tool.name.as_str() {
+            "execute_command" => self.execute_command_tool(&tool_call).await,
+            "read_file" => self.read_file_tool(&tool_call).await,
+            "write_file" => self.write_file_tool(&tool_call).await,
+            "list_directory" => self.list_directory_tool(&tool_call).await,
+            "get_system_info" => self.get_system_info_tool(&tool_call).await,
+            "search_files" => self.search_files_tool(&tool_call).await,
+            "git_status" => self.git_status_tool(&tool_call).await,
+            "process_list" => self.process_list_tool(&tool_call).await,
+            _ => Err(ToolError::ToolNotFound(tool_call.name.clone())),
         };
 
         match result {
             Ok(output) => Ok(ToolResult {
-                tool_call_id: tool_call.id,
+                tool_call_id: tool_call.name.clone(),
                 success: true,
                 output,
                 error: None,
             }),
             Err(error) => Ok(ToolResult {
-                tool_call_id: tool_call.id,
+                tool_call_id: tool_call.name.clone(),
                 success: false,
                 output: String::new(),
                 error: Some(error.to_string()),
@@ -480,20 +432,6 @@ impl ToolRegistry {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ToolError {
-    #[error("Tool not found: {0}")]
-    ToolNotFound(String),
-    #[error("Missing required argument: {0}")]
-    MissingArgument(String),
-    #[error("Execution error: {0}")]
-    ExecutionError(String),
-    #[error("IO error: {0}")]
-    IoError(String),
-    #[error("Serialization error: {0}")]
-    SerializationError(#[from] serde_json::Error),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,15 +449,14 @@ mod tests {
         let mut registry = ToolRegistry::new();
         let initial_count = registry.tools.len();
 
-        let custom_tool = Tool {
+        let custom_tool = ToolDefinition {
             name: "custom_tool".to_string(),
             description: "A custom tool".to_string(),
-            parameters: ToolParameters {
-                r#type: "object".to_string(),
-                properties: HashMap::new(),
-                required: vec![],
-            },
-            function: ToolFunction::GetSystemInfo,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
         };
 
         registry.register_tool(custom_tool);
@@ -531,9 +468,8 @@ mod tests {
     async fn test_system_info_tool() {
         let registry = ToolRegistry::new();
         let tool_call = ToolCall {
-            id: "test_id".to_string(),
             name: "get_system_info".to_string(),
-            arguments: HashMap::new(),
+            arguments: serde_json::json!({}),
         };
 
         let result = registry.execute_tool(tool_call).await.unwrap();

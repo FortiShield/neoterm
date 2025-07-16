@@ -6,11 +6,13 @@ pub mod parser;
 pub mod manager;
 pub mod executor;
 pub mod ui;
+pub mod debugger;
 
 pub use parser::*;
 pub use manager::*;
 pub use executor::*;
 pub use ui::*;
+pub use debugger::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {

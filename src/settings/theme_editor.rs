@@ -1,8 +1,11 @@
 use iced::{Element, widget::{column, row, text, button, text_input, slider, color_picker}};
 use crate::config::{ThemeConfig, ColorScheme, ColorValue};
+use crate::config::yaml_theme_manager::YamlThemeManager;
 
 #[derive(Debug, Clone)]
 pub struct ThemeEditor {
+    theme_manager: YamlThemeManager,
+    pub selected_theme_name: String,
     theme: ThemeConfig,
     editing_color: Option<String>,
     preview_text: String,
@@ -20,48 +23,50 @@ pub enum Message {
     SaveTheme,
     ResetTheme,
     PreviewTextChanged(String),
+    ThemeSelected(String),
 }
 
 impl ThemeEditor {
-    pub fn new(theme: ThemeConfig) -> Self {
+    pub fn new(initial_theme_name: String) -> Self {
+        let theme_manager = YamlThemeManager::new();
+        let theme = theme_manager.get_theme(&initial_theme_name).unwrap_or_else(ThemeConfig::default);
         Self {
+            theme_manager,
+            selected_theme_name: initial_theme_name,
             theme,
             editing_color: None,
             preview_text: "echo 'Hello, World!'\nls -la\ngit status".to_string(),
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Option<ThemeConfig> {
+    pub fn update(&mut self, message: Message) {
         match message {
             Message::ColorChanged(color_name, color) => {
                 self.update_color(&color_name, color);
-                Some(self.theme.clone())
             }
             Message::FontFamilyChanged(family) => {
                 self.theme.typography.font_family = family;
-                Some(self.theme.clone())
             }
             Message::FontSizeChanged(size) => {
                 self.theme.typography.font_size = size;
-                Some(self.theme.clone())
             }
             Message::LineHeightChanged(height) => {
                 self.theme.typography.line_height = height;
-                Some(self.theme.clone())
             }
             Message::BorderRadiusChanged(radius) => {
                 self.theme.effects.border_radius = radius;
-                Some(self.theme.clone())
             }
             Message::PreviewTextChanged(text) => {
                 self.preview_text = text;
-                None
             }
             Message::ResetTheme => {
                 self.theme = ThemeConfig::default();
-                Some(self.theme.clone())
             }
-            _ => None,
+            Message::ThemeSelected(name) => {
+                self.selected_theme_name = name;
+                self.theme = self.theme_manager.get_theme(&self.selected_theme_name).unwrap_or_else(ThemeConfig::default);
+                // In a real app, you'd apply the theme here
+            }
         }
     }
 
@@ -80,9 +85,25 @@ impl ThemeEditor {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&mut self) -> Element<Message> {
+        let themes = self.theme_manager.get_all_theme_names();
+        let theme_radios: Vec<Element<Message>> = themes
+            .into_iter()
+            .map(|name| {
+                radio(
+                    name.clone(),
+                    name.clone(),
+                    Some(self.selected_theme_name.clone()),
+                    Message::ThemeSelected,
+                )
+                .into()
+            })
+            .collect();
+
         column![
-            text("Theme Editor").size(18),
+            text("Theme Editor").size(20),
+            text("Select a theme:"),
+            column(theme_radios).spacing(5),
             
             // Typography section
             text("Typography").size(16),
@@ -123,7 +144,7 @@ impl ThemeEditor {
                 button("Save Theme").on_press(Message::SaveTheme),
             ].spacing(8),
         ]
-        .spacing(12)
+        .spacing(10)
         .into()
     }
 

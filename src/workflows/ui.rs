@@ -495,4 +495,25 @@ impl WorkflowUI {
                     })
                     .into()
             } else {
-                iced::widget::Space::new(0, 0).
+                iced::widget::Space::new(0, 0).into()
+            },
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn create_workflow_dialog(&self) -> Element<Message> {
+        // Placeholder for workflow creation dialog
+        container(text("Create Workflow Dialog Placeholder"))
+            .center_x()
+            .center_y()
+            .into()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkflowExecutionRequest {
+    workflow: Workflow,
+    arguments: HashMap<String, String>,
+    dry_run: bool,
+}

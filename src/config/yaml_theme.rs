@@ -1,33 +1,27 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::config::{ThemeConfig, ColorScheme, ColorValue, AnsiColors, Typography, Effects, Spacing};
+use iced;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlTheme {
-    pub name: Option<String>,
-    pub author: Option<String>,
-    pub description: Option<String>,
-    pub accent: String,
-    pub background: String,
-    pub details: Option<String>, // "darker" or "lighter"
-    pub foreground: String,
-    pub terminal_colors: TerminalColors,
-    
-    // Optional extended properties
-    pub cursor: Option<String>,
-    pub selection: Option<String>,
-    pub border: Option<String>,
-    pub inactive_tab: Option<String>,
-    pub active_tab: Option<String>,
-    
-    // UI colors (optional)
-    pub ui_colors: Option<UiColors>,
-    
-    // Typography (optional)
+    pub name: String,
+    pub colors: YamlColors,
+    // Add other theme properties like fonts, etc.
     pub font: Option<FontConfig>,
-    
-    // Effects (optional)
     pub effects: Option<EffectConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YamlColors {
+    pub background: String,
+    pub foreground: String,
+    pub primary: String,
+    pub secondary: String,
+    pub danger: String,
+    pub text: String,
+    pub border: String,
+    // Add more specific colors if needed (e.g., syntax highlighting colors)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,77 +110,52 @@ impl YamlTheme {
     /// Convert to internal ThemeConfig
     pub fn to_theme_config(&self) -> Result<ThemeConfig, YamlThemeError> {
         let colors = ColorScheme {
-            background: parse_color(&self.background)?,
+            background: parse_color(&self.colors.background)?,
             surface: self.derive_surface_color()?,
             surface_variant: self.derive_surface_variant_color()?,
             
-            text: parse_color(&self.foreground)?,
+            text: parse_color(&self.colors.foreground)?,
             text_secondary: self.derive_text_secondary()?,
             text_disabled: self.derive_text_disabled()?,
             
-            terminal_background: parse_color(&self.background)?,
-            terminal_foreground: parse_color(&self.foreground)?,
-            terminal_cursor: self.cursor.as_ref()
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| parse_color(&self.accent).unwrap_or_default()),
-            terminal_selection: self.selection.as_ref()
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| self.derive_selection_color().unwrap_or_default()),
+            terminal_background: parse_color(&self.colors.background)?,
+            terminal_foreground: parse_color(&self.colors.foreground)?,
+            terminal_cursor: parse_color(&self.colors.primary).unwrap_or_default(),
+            terminal_selection: parse_color(&self.colors.secondary).unwrap_or_default(),
             
             ansi_colors: AnsiColors {
-                black: parse_color(&self.terminal_colors.normal.black)?,
-                red: parse_color(&self.terminal_colors.normal.red)?,
-                green: parse_color(&self.terminal_colors.normal.green)?,
-                yellow: parse_color(&self.terminal_colors.normal.yellow)?,
-                blue: parse_color(&self.terminal_colors.normal.blue)?,
-                magenta: parse_color(&self.terminal_colors.normal.magenta)?,
-                cyan: parse_color(&self.terminal_colors.normal.cyan)?,
-                white: parse_color(&self.terminal_colors.normal.white)?,
+                black: parse_color(&self.colors.background)?,
+                red: parse_color(&self.colors.danger)?,
+                green: parse_color(&self.colors.success)?,
+                yellow: parse_color(&self.colors.warning)?,
+                blue: parse_color(&self.colors.primary)?,
+                magenta: parse_color(&self.colors.secondary)?,
+                cyan: parse_color(&self.colors.text)?,
+                white: parse_color(&self.colors.foreground)?,
                 
-                bright_black: parse_color(&self.terminal_colors.bright.black)?,
-                bright_red: parse_color(&self.terminal_colors.bright.red)?,
-                bright_green: parse_color(&self.terminal_colors.bright.green)?,
-                bright_yellow: parse_color(&self.terminal_colors.bright.yellow)?,
-                bright_blue: parse_color(&self.terminal_colors.bright.blue)?,
-                bright_magenta: parse_color(&self.terminal_colors.bright.magenta)?,
-                bright_cyan: parse_color(&self.terminal_colors.bright.cyan)?,
-                bright_white: parse_color(&self.terminal_colors.bright.white)?,
+                bright_black: parse_color(&self.colors.background)?,
+                bright_red: parse_color(&self.colors.danger)?,
+                bright_green: parse_color(&self.colors.success)?,
+                bright_yellow: parse_color(&self.colors.warning)?,
+                bright_blue: parse_color(&self.colors.primary)?,
+                bright_magenta: parse_color(&self.colors.secondary)?,
+                bright_cyan: parse_color(&self.colors.text)?,
+                bright_white: parse_color(&self.colors.foreground)?,
             },
             
-            primary: parse_color(&self.accent)?,
-            secondary: self.ui_colors.as_ref()
-                .and_then(|ui| ui.secondary.as_ref())
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| self.derive_secondary_color().unwrap_or_default()),
-            accent: parse_color(&self.accent)?,
-            success: self.ui_colors.as_ref()
-                .and_then(|ui| ui.success.as_ref())
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| parse_color(&self.terminal_colors.normal.green).unwrap_or_default()),
-            warning: self.ui_colors.as_ref()
-                .and_then(|ui| ui.warning.as_ref())
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| parse_color(&self.terminal_colors.normal.yellow).unwrap_or_default()),
-            error: self.ui_colors.as_ref()
-                .and_then(|ui| ui.error.as_ref())
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| parse_color(&self.terminal_colors.normal.red).unwrap_or_default()),
+            primary: parse_color(&self.colors.primary)?,
+            secondary: parse_color(&self.colors.secondary)?,
+            accent: parse_color(&self.colors.primary)?,
+            success: parse_color(&self.colors.success)?,
+            warning: parse_color(&self.colors.warning)?,
+            error: parse_color(&self.colors.danger)?,
             
             hover: self.derive_hover_color()?,
             active: self.derive_active_color()?,
             focus: self.derive_focus_color()?,
             disabled: self.derive_disabled_color()?,
             
-            border: self.border.as_ref()
-                .map(|c| parse_color(c))
-                .transpose()?
-                .unwrap_or_else(|| self.derive_border_color().unwrap_or_default()),
+            border: parse_color(&self.colors.border)?,
             divider: self.derive_divider_color()?,
         };
 
@@ -220,7 +189,7 @@ impl YamlTheme {
         };
 
         Ok(ThemeConfig {
-            name: self.name.clone().unwrap_or_else(|| "Custom YAML Theme".to_string()),
+            name: self.name.clone(),
             colors,
             typography,
             spacing: Spacing::default(),
@@ -232,56 +201,16 @@ impl YamlTheme {
     /// Create from internal ThemeConfig
     pub fn from_theme_config(theme: &ThemeConfig) -> Self {
         Self {
-            name: Some(theme.name.clone()),
-            author: None,
-            description: None,
-            accent: color_to_hex(&theme.colors.accent),
-            background: color_to_hex(&theme.colors.background),
-            details: None,
-            foreground: color_to_hex(&theme.colors.text),
-            cursor: Some(color_to_hex(&theme.colors.terminal_cursor)),
-            selection: Some(color_to_hex(&theme.colors.terminal_selection)),
-            border: Some(color_to_hex(&theme.colors.border)),
-            inactive_tab: None,
-            active_tab: None,
-            
-            terminal_colors: TerminalColors {
-                normal: AnsiColorSet {
-                    black: color_to_hex(&theme.colors.ansi_colors.black),
-                    red: color_to_hex(&theme.colors.ansi_colors.red),
-                    green: color_to_hex(&theme.colors.ansi_colors.green),
-                    yellow: color_to_hex(&theme.colors.ansi_colors.yellow),
-                    blue: color_to_hex(&theme.colors.ansi_colors.blue),
-                    magenta: color_to_hex(&theme.colors.ansi_colors.magenta),
-                    cyan: color_to_hex(&theme.colors.ansi_colors.cyan),
-                    white: color_to_hex(&theme.colors.ansi_colors.white),
-                },
-                bright: AnsiColorSet {
-                    black: color_to_hex(&theme.colors.ansi_colors.bright_black),
-                    red: color_to_hex(&theme.colors.ansi_colors.bright_red),
-                    green: color_to_hex(&theme.colors.ansi_colors.bright_green),
-                    yellow: color_to_hex(&theme.colors.ansi_colors.bright_yellow),
-                    blue: color_to_hex(&theme.colors.ansi_colors.bright_blue),
-                    magenta: color_to_hex(&theme.colors.ansi_colors.bright_magenta),
-                    cyan: color_to_hex(&theme.colors.ansi_colors.bright_cyan),
-                    white: color_to_hex(&theme.colors.ansi_colors.bright_white),
-                },
-                palette: None,
+            name: theme.name.clone(),
+            colors: YamlColors {
+                background: color_to_hex(&theme.colors.background),
+                foreground: color_to_hex(&theme.colors.text),
+                primary: color_to_hex(&theme.colors.primary),
+                secondary: color_to_hex(&theme.colors.secondary),
+                danger: color_to_hex(&theme.colors.error),
+                text: color_to_hex(&theme.colors.text),
+                border: color_to_hex(&theme.colors.border),
             },
-            
-            ui_colors: Some(UiColors {
-                primary: Some(color_to_hex(&theme.colors.primary)),
-                secondary: Some(color_to_hex(&theme.colors.secondary)),
-                success: Some(color_to_hex(&theme.colors.success)),
-                warning: Some(color_to_hex(&theme.colors.warning)),
-                error: Some(color_to_hex(&theme.colors.error)),
-                info: None,
-                surface: Some(color_to_hex(&theme.colors.surface)),
-                surface_variant: Some(color_to_hex(&theme.colors.surface_variant)),
-                outline: Some(color_to_hex(&theme.colors.border)),
-                shadow: Some(color_to_hex(&theme.effects.shadow_color)),
-            }),
-            
             font: Some(FontConfig {
                 family: Some(theme.typography.font_family.clone()),
                 size: Some(theme.typography.font_size),
@@ -290,7 +219,6 @@ impl YamlTheme {
                 line_height: Some(theme.typography.line_height),
                 letter_spacing: Some(theme.typography.letter_spacing),
             }),
-            
             effects: Some(EffectConfig {
                 border_radius: Some(theme.effects.border_radius),
                 shadow_blur: Some(theme.effects.shadow_blur),
@@ -305,50 +233,20 @@ impl YamlTheme {
     /// Validate theme completeness and correctness
     pub fn validate(&self) -> Result<(), YamlThemeError> {
         // Check required fields
-        parse_color(&self.accent).map_err(|_| YamlThemeError::InvalidColor("accent".to_string()))?;
-        parse_color(&self.background).map_err(|_| YamlThemeError::InvalidColor("background".to_string()))?;
-        parse_color(&self.foreground).map_err(|_| YamlThemeError::InvalidColor("foreground".to_string()))?;
-
-        // Validate terminal colors
-        self.validate_ansi_colors(&self.terminal_colors.normal, "normal")?;
-        self.validate_ansi_colors(&self.terminal_colors.bright, "bright")?;
-
-        // Check optional colors
-        if let Some(cursor) = &self.cursor {
-            parse_color(cursor).map_err(|_| YamlThemeError::InvalidColor("cursor".to_string()))?;
-        }
-
-        if let Some(selection) = &self.selection {
-            parse_color(selection).map_err(|_| YamlThemeError::InvalidColor("selection".to_string()))?;
-        }
-
-        Ok(())
-    }
-
-    fn validate_ansi_colors(&self, colors: &AnsiColorSet, set_name: &str) -> Result<(), YamlThemeError> {
-        let color_names = [
-            ("black", &colors.black),
-            ("red", &colors.red),
-            ("green", &colors.green),
-            ("yellow", &colors.yellow),
-            ("blue", &colors.blue),
-            ("magenta", &colors.magenta),
-            ("cyan", &colors.cyan),
-            ("white", &colors.white),
-        ];
-
-        for (name, color) in color_names {
-            parse_color(color).map_err(|_| {
-                YamlThemeError::InvalidColor(format!("{}.{}", set_name, name))
-            })?;
-        }
+        parse_color(&self.colors.background).map_err(|_| YamlThemeError::InvalidColor("background".to_string()))?;
+        parse_color(&self.colors.foreground).map_err(|_| YamlThemeError::InvalidColor("foreground".to_string()))?;
+        parse_color(&self.colors.primary).map_err(|_| YamlThemeError::InvalidColor("primary".to_string()))?;
+        parse_color(&self.colors.secondary).map_err(|_| YamlThemeError::InvalidColor("secondary".to_string()))?;
+        parse_color(&self.colors.danger).map_err(|_| YamlThemeError::InvalidColor("danger".to_string()))?;
+        parse_color(&self.colors.text).map_err(|_| YamlThemeError::InvalidColor("text".to_string()))?;
+        parse_color(&self.colors.border).map_err(|_| YamlThemeError::InvalidColor("border".to_string()))?;
 
         Ok(())
     }
 
     // Helper methods for deriving colors
     fn derive_surface_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.background)?;
+        let bg = parse_color(&self.colors.background)?;
         Ok(if self.is_dark_theme() {
             lighten_color(&bg, 0.05)
         } else {
@@ -357,7 +255,7 @@ impl YamlTheme {
     }
 
     fn derive_surface_variant_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.background)?;
+        let bg = parse_color(&self.colors.background)?;
         Ok(if self.is_dark_theme() {
             lighten_color(&bg, 0.1)
         } else {
@@ -366,7 +264,7 @@ impl YamlTheme {
     }
 
     fn derive_text_secondary(&self) -> Result<ColorValue, YamlThemeError> {
-        let fg = parse_color(&self.foreground)?;
+        let fg = parse_color(&self.colors.foreground)?;
         Ok(ColorValue {
             a: 0.7,
             ..fg
@@ -374,25 +272,9 @@ impl YamlTheme {
     }
 
     fn derive_text_disabled(&self) -> Result<ColorValue, YamlThemeError> {
-        let fg = parse_color(&self.foreground)?;
+        let fg = parse_color(&self.colors.foreground)?;
         Ok(ColorValue {
             a: 0.5,
-            ..fg
-        })
-    }
-
-    fn derive_selection_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let accent = parse_color(&self.accent)?;
-        Ok(ColorValue {
-            a: 0.3,
-            ..accent
-        })
-    }
-
-    fn derive_secondary_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let fg = parse_color(&self.foreground)?;
-        Ok(ColorValue {
-            a: 0.6,
             ..fg
         })
     }
@@ -414,7 +296,7 @@ impl YamlTheme {
     }
 
     fn derive_focus_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let accent = parse_color(&self.accent)?;
+        let accent = parse_color(&self.colors.primary)?;
         Ok(ColorValue {
             a: 0.5,
             ..accent
@@ -425,17 +307,8 @@ impl YamlTheme {
         Ok(ColorValue { r: 0.5, g: 0.5, b: 0.5, a: 0.5 })
     }
 
-    fn derive_border_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.background)?;
-        Ok(if self.is_dark_theme() {
-            lighten_color(&bg, 0.2)
-        } else {
-            darken_color(&bg, 0.2)
-        })
-    }
-
     fn derive_divider_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.background)?;
+        let bg = parse_color(&self.colors.background)?;
         Ok(if self.is_dark_theme() {
             lighten_color(&bg, 0.15)
         } else {
@@ -444,12 +317,24 @@ impl YamlTheme {
     }
 
     fn is_dark_theme(&self) -> bool {
-        if let Ok(bg) = parse_color(&self.background) {
+        if let Ok(bg) = parse_color(&self.colors.background) {
             // Calculate luminance
             let luminance = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
             luminance < 0.5
         } else {
             true // Default to dark
+        }
+    }
+
+    pub fn to_iced_theme(&self) -> crate::config::theme::Theme {
+        crate::config::theme::Theme {
+            background: parse_hex_color(&self.colors.background).unwrap_or(iced::Color::BLACK),
+            foreground: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::WHITE),
+            primary: parse_hex_color(&self.colors.primary).unwrap_or(iced::Color::BLUE),
+            secondary: parse_hex_color(&self.colors.secondary).unwrap_or(iced::Color::from_rgb8(100, 100, 100)),
+            danger: parse_hex_color(&self.colors.danger).unwrap_or(iced::Color::RED),
+            text: parse_hex_color(&self.colors.text).unwrap_or(iced::Color::BLACK),
+            border: parse_hex_color(&self.colors.border).unwrap_or(iced::Color::from_rgb8(200, 200, 200)),
         }
     }
 }
@@ -648,6 +533,18 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
     (r + m, g + m, b + m)
 }
 
+fn parse_hex_color_iced(hex: &str) -> Option<iced::Color> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(iced::Color::from_rgb8(r, g, b))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,32 +566,27 @@ mod tests {
     fn test_yaml_theme_conversion() {
         let yaml_str = r#"
 name: "Test Theme"
-accent: "#009688"
-background: "#2f343f"
-foreground: "#d3dae3"
-terminal_colors:
-  normal:
-    black: "#262b36"
-    red: "#9c3528"
-    green: "#61bc3b"
-    yellow: "#f3b43a"
-    blue: "#0d68a8"
-    magenta: "#744560"
-    cyan: "#288e9c"
-    white: "#a2a2a2"
-  bright:
-    black: "#2f343f"
-    red: "#d64937"
-    green: "#86df5d"
-    yellow: "#fdd75a"
-    blue: "#0f75bd"
-    magenta: "#9e5e83"
-    cyan: "#37c3d6"
-    white: "#f9f9f9"
+colors:
+  background: "#2f343f"
+  foreground: "#d3dae3"
+  primary: "#009688"
+  secondary: "#61bc3b"
+  danger: "#9c3528"
+  text: "#f3b43a"
+  border: "#0d68a8"
+font:
+  family: "JetBrains Mono"
+  size: 14.0
+  line_height: 1.4
+  letter_spacing: 0.0
+effects:
+  border_radius: 8.0
+  shadow_blur: 4.0
+  shadow_offset: [0.0, 2.0]
 "#;
 
         let theme = YamlTheme::from_yaml(yaml_str).unwrap();
-        assert_eq!(theme.name.as_ref().unwrap(), "Test Theme");
+        assert_eq!(theme.name, "Test Theme");
         assert!(theme.validate().is_ok());
         
         let theme_config = theme.to_theme_config().unwrap();

@@ -2,6 +2,18 @@ use super::{Workflow, WorkflowError, WorkflowCategory, Shell, WorkflowSearchResu
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+use serde::{Deserialize, Serialize};
+use chrono::DateTime;
+use reqwest;
+use sanitize_filename;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowUsageStats {
+    pub usage_count: u32,
+    pub last_used: DateTime<chrono::Utc>,
+    pub average_execution_time: Option<std::time::Duration>,
+    pub success_rate: f32,
+}
 
 pub struct WorkflowManager {
     workflows: HashMap<String, Workflow>,
@@ -9,14 +21,6 @@ pub struct WorkflowManager {
     categories: HashMap<WorkflowCategory, Vec<String>>,
     matcher: SkimMatcherV2,
     usage_stats: HashMap<String, WorkflowUsageStats>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WorkflowUsageStats {
-    pub usage_count: u32,
-    pub last_used: chrono::DateTime<chrono::Utc>,
-    pub average_execution_time: Option<std::time::Duration>,
-    pub success_rate: f32,
 }
 
 impl WorkflowManager {
@@ -380,13 +384,4 @@ impl WorkflowManager {
 
         Ok(())
     }
-}
-
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c => c,
-        })
-        .collect()
 }

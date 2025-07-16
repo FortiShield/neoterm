@@ -7,7 +7,7 @@ details: "darker"
 foreground: "#ebdbb2"
 cursor: "#ebdbb2"
 selection: "#665c54"
-border: "#3c3836"
+border: "#665c54"
 
 terminal_colors:
   normal:
@@ -30,8 +30,8 @@ terminal_colors:
     white: "#ebdbb2"
 
 ui_colors:
-  primary: "#fe8019"
-  secondary: "#928374"
+  primary: "#458588"
+  secondary: "#83a598"
   success: "#b8bb26"
   warning: "#fabd2f"
   error: "#fb4934"
@@ -39,6 +39,8 @@ ui_colors:
   surface: "#3c3836"
   surface_variant: "#504945"
   outline: "#665c54"
+  danger: "#cc241d"
+  text: "#ebdbb2"
 
 font:
   family: "JetBrains Mono"

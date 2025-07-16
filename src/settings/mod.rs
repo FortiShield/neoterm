@@ -1,20 +1,14 @@
 use iced::{Element, widget::{column, row, text, button, container, scrollable, pick_list, slider, checkbox, text_input}};
 use crate::{Message, config::*};
+use std::collections::HashMap;
 
 pub mod theme_editor;
 pub mod keybinding_editor;
+pub mod yaml_theme_ui;
 
 use theme_editor::ThemeEditor;
 use keybinding_editor::KeyBindingEditor;
-
-#[derive(Debug, Clone)]
-pub struct SettingsView {
-    pub active_tab: SettingsTab,
-    pub config: AppConfig,
-    pub theme_editor: ThemeEditor,
-    pub keybinding_editor: KeyBindingEditor,
-    pub unsaved_changes: bool,
-}
+use yaml_theme_ui::YamlThemeEditor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsTab {
@@ -26,6 +20,7 @@ pub enum SettingsTab {
     Performance,
     Privacy,
     Plugins,
+    EnvironmentProfiles, // New tab for environment profiles
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +37,19 @@ pub enum SettingsMessage {
     Cancel,
     ThemeEditor(theme_editor::Message),
     KeyBindingEditor(keybinding_editor::Message),
+    YamlThemeEditor(yaml_theme_ui::Message),
+
+    // Environment Profile Management
+    SelectEnvironmentProfile(String), // For setting active profile
+    EditEnvironmentProfile(Option<String>), // None for new, Some(name) for existing
+    SaveEnvironmentProfile,
+    CancelEditEnvironmentProfile,
+    DeleteEnvironmentProfile(String),
+    EnvironmentProfileNameChanged(String),
+    EnvironmentVariableKeyChanged(usize, String), // index, new_key
+    EnvironmentVariableValueChanged(usize, String), // index, new_value
+    AddEnvironmentVariable,
+    RemoveEnvironmentVariable(usize), // index
 }
 
 #[derive(Debug, Clone)]
@@ -96,27 +104,45 @@ pub enum ConfigChange {
     LogLevel(LogLevel),
 }
 
+pub struct SettingsView {
+    pub active_tab: SettingsTab,
+    pub config: AppConfig,
+    pub theme_editor: ThemeEditor,
+    pub keybinding_editor: KeyBindingEditor,
+    pub yaml_theme_editor: YamlThemeEditor,
+    pub unsaved_changes: bool,
+    
+    // Environment Profile Editor State
+    pub editing_env_profile: Option<EnvironmentProfile>,
+    pub editing_env_profile_original_name: Option<String>, // To track if it's a new profile or an edit
+    pub env_profile_error: Option<String>, // For validation errors
+}
+
 impl SettingsView {
     pub fn new(config: AppConfig) -> Self {
         Self {
             active_tab: SettingsTab::General,
             theme_editor: ThemeEditor::new(config.theme.clone()),
             keybinding_editor: KeyBindingEditor::new(config.keybindings.clone()),
+            yaml_theme_editor: YamlThemeEditor::new(),
             config,
             unsaved_changes: false,
+            editing_env_profile: None,
+            editing_env_profile_original_name: None,
+            env_profile_error: None,
         }
     }
 
-    pub fn update(&mut self, message: SettingsMessage) -> Option<AppConfig> {
+    pub fn update(&mut self, message: SettingsMessage) {
         match message {
             SettingsMessage::TabChanged(tab) => {
                 self.active_tab = tab;
-                None
+                self.editing_env_profile = None; // Close editor when changing tabs
+                self.env_profile_error = None;
             }
             SettingsMessage::ConfigChanged(change) => {
                 self.apply_config_change(change);
                 self.unsaved_changes = true;
-                None
             }
             SettingsMessage::ThemeChanged(theme_name) => {
                 if let Some(theme) = ThemeConfig::builtin_themes()
@@ -126,134 +152,176 @@ impl SettingsView {
                     self.config.theme = theme;
                     self.unsaved_changes = true;
                 }
-                None
             }
             SettingsMessage::Save => {
                 if let Err(e) = self.config.save() {
                     eprintln!("Failed to save config: {}", e);
                 }
                 self.unsaved_changes = false;
-                Some(self.config.clone())
             }
             SettingsMessage::Cancel => {
                 // Reload config from disk
                 if let Ok(config) = AppConfig::load() {
                     self.config = config.clone();
                     self.unsaved_changes = false;
-                    Some(config)
+                    self.editing_env_profile = None; // Reset editor state
+                    self.env_profile_error = None;
                 } else {
-                    None
+                    // Handle error loading config
                 }
             }
             SettingsMessage::ResetToDefaults => {
                 self.config = AppConfig::default();
                 self.unsaved_changes = true;
-                None
+                self.editing_env_profile = None; // Reset editor state
+                self.env_profile_error = None;
             }
             SettingsMessage::ThemeEditor(msg) => {
                 if let Some(theme) = self.theme_editor.update(msg) {
                     self.config.theme = theme;
                     self.unsaved_changes = true;
                 }
-                None
             }
             SettingsMessage::KeyBindingEditor(msg) => {
                 if let Some(keybindings) = self.keybinding_editor.update(msg) {
                     self.config.keybindings = keybindings;
                     self.unsaved_changes = true;
                 }
-                None
             }
-            _ => None,
+            SettingsMessage::YamlThemeEditor(msg) => {
+                self.yaml_theme_editor.update(msg);
+                // Potentially update config based on YAML theme changes
+            }
+            // Environment Profile Messages
+            SettingsMessage::SelectEnvironmentProfile(name) => {
+                self.config.env_profiles.active_profile = Some(name);
+                self.unsaved_changes = true;
+            }
+            SettingsMessage::EditEnvironmentProfile(name_opt) => {
+                self.env_profile_error = None;
+                if let Some(name) = name_opt {
+                    if let Some(profile) = self.config.env_profiles.profiles.get(&name) {
+                        self.editing_env_profile = Some(profile.clone());
+                        self.editing_env_profile_original_name = Some(name);
+                    }
+                } else {
+                    // New profile
+                    self.editing_env_profile = Some(EnvironmentProfile {
+                        name: "New Profile".to_string(),
+                        variables: HashMap::new(),
+                    });
+                    self.editing_env_profile_original_name = None;
+                }
+            }
+            SettingsMessage::SaveEnvironmentProfile => {
+                if let Some(mut profile_to_save) = self.editing_env_profile.take() {
+                    // Validate name
+                    if profile_to_save.name.trim().is_empty() {
+                        self.env_profile_error = Some("Profile name cannot be empty.".to_string());
+                        self.editing_env_profile = Some(profile_to_save); // Restore for editing
+                        return;
+                    }
+                    
+                    // Check for duplicate name if it's a new profile or name changed
+                    if let Some(original_name) = &self.editing_env_profile_original_name {
+                        if original_name != &profile_to_save.name && self.config.env_profiles.profiles.contains_key(&profile_to_save.name) {
+                            self.env_profile_error = Some(format!("Profile with name '{}' already exists.", profile_to_save.name));
+                            self.editing_env_profile = Some(profile_to_save);
+                            return;
+                        }
+                        // Remove old entry if name changed
+                        if original_name != &profile_to_save.name {
+                            self.config.env_profiles.profiles.remove(original_name);
+                            // If the old profile was active, switch to the new one
+                            if self.config.env_profiles.active_profile.as_ref() == Some(original_name) {
+                                self.config.env_profiles.active_profile = Some(profile_to_save.name.clone());
+                            }
+                        }
+                    } else { // It's a new profile
+                        if self.config.env_profiles.profiles.contains_key(&profile_to_save.name) {
+                            self.env_profile_error = Some(format!("Profile with name '{}' already exists.", profile_to_save.name));
+                            self.editing_env_profile = Some(profile_to_save);
+                            return;
+                        }
+                    }
+
+                    // Clean up empty variables
+                    profile_to_save.variables.retain(|k, v| !k.trim().is_empty() || !v.trim().is_empty());
+
+                    self.config.env_profiles.profiles.insert(profile_to_save.name.clone(), profile_to_save);
+                    self.editing_env_profile_original_name = None;
+                    self.unsaved_changes = true;
+                    self.env_profile_error = None;
+                }
+            }
+            SettingsMessage::CancelEditEnvironmentProfile => {
+                self.editing_env_profile = None;
+                self.editing_env_profile_original_name = None;
+                self.env_profile_error = None;
+            }
+            SettingsMessage::DeleteEnvironmentProfile(name) => {
+                if self.config.env_profiles.profiles.remove(&name).is_some() {
+                    if self.config.env_profiles.active_profile.as_ref() == Some(&name) {
+                        self.config.env_profiles.active_profile = self.config.env_profiles.profiles.keys().next().cloned();
+                    }
+                    self.unsaved_changes = true;
+                }
+            }
+            SettingsMessage::EnvironmentProfileNameChanged(new_name) => {
+                if let Some(profile) = &mut self.editing_env_profile {
+                    profile.name = new_name;
+                }
+            }
+            SettingsMessage::EnvironmentVariableKeyChanged(index, new_key) => {
+                if let Some(profile) = &mut self.editing_env_profile {
+                    let mut vars: Vec<(String, String)> = profile.variables.drain().collect();
+                    if let Some((key, _)) = vars.get_mut(index) {
+                        *key = new_key;
+                    }
+                    profile.variables = vars.into_iter().collect();
+                }
+            }
+            SettingsMessage::EnvironmentVariableValueChanged(index, new_value) => {
+                if let Some(profile) = &mut self.editing_env_profile {
+                    let mut vars: Vec<(String, String)> = profile.variables.drain().collect();
+                    if let Some((_, value)) = vars.get_mut(index) {
+                        *value = new_value;
+                    }
+                    profile.variables = vars.into_iter().collect();
+                }
+            }
+            SettingsMessage::AddEnvironmentVariable => {
+                if let Some(profile) = &mut self.editing_env_profile {
+                    profile.variables.insert("".to_string(), "".to_string());
+                }
+            }
+            SettingsMessage::RemoveEnvironmentVariable(index) => {
+                if let Some(profile) = &mut self.editing_env_profile {
+                    let mut vars: Vec<(String, String)> = profile.variables.drain().collect();
+                    if index < vars.len() {
+                        vars.remove(index);
+                    }
+                    profile.variables = vars.into_iter().collect();
+                }
+            }
         }
     }
 
-    fn apply_config_change(&mut self, change: ConfigChange) {
-        match change {
-            ConfigChange::StartupBehavior(behavior) => {
-                self.config.preferences.general.startup_behavior = behavior;
-            }
-            ConfigChange::DefaultShell(shell) => {
-                self.config.preferences.general.default_shell = Some(shell);
-            }
-            ConfigChange::AutoUpdate(enabled) => {
-                self.config.preferences.general.auto_update = enabled;
-            }
-            ConfigChange::ScrollbackLines(lines) => {
-                self.config.preferences.terminal.scrollback_lines = lines;
-            }
-            ConfigChange::ScrollSensitivity(sensitivity) => {
-                self.config.preferences.terminal.scroll_sensitivity = sensitivity;
-            }
-            ConfigChange::CopyOnSelect(enabled) => {
-                self.config.preferences.terminal.copy_on_select = enabled;
-            }
-            ConfigChange::VimMode(enabled) => {
-                self.config.preferences.editor.vim_mode = enabled;
-            }
-            ConfigChange::AutoSuggestions(enabled) => {
-                self.config.preferences.editor.auto_suggestions = enabled;
-            }
-            ConfigChange::Transparency(value) => {
-                self.config.preferences.ui.transparency = value;
-            }
-            ConfigChange::GpuAcceleration(enabled) => {
-                self.config.preferences.performance.gpu_acceleration = enabled;
-            }
-            // Add other config changes...
-            _ => {}
-        }
-    }
+    pub fn view(&mut self) -> Element<SettingsMessage> {
+        let tabs = row![
+            button(text("General")).on_press(SettingsMessage::TabChanged(SettingsTab::General)),
+            button(text("Appearance")).on_press(SettingsMessage::TabChanged(SettingsTab::Appearance)),
+            button(text("Terminal")).on_press(SettingsMessage::TabChanged(SettingsTab::Terminal)),
+            button(text("Editor")).on_press(SettingsMessage::TabChanged(SettingsTab::Editor)),
+            button(text("Key Bindings")).on_press(SettingsMessage::TabChanged(SettingsTab::KeyBindings)),
+            button(text("Performance")).on_press(SettingsMessage::TabChanged(SettingsTab::Performance)),
+            button(text("Privacy")).on_press(SettingsMessage::TabChanged(SettingsTab::Privacy)),
+            button(text("Plugins")).on_press(SettingsMessage::TabChanged(SettingsTab::Plugins)),
+            button(text("Environment Profiles")).on_press(SettingsMessage::TabChanged(SettingsTab::EnvironmentProfiles)),
+        ]
+        .spacing(10);
 
-    pub fn view(&self) -> Element<SettingsMessage> {
-        let tabs = self.create_tabs();
-        let content = self.create_content();
-        let actions = self.create_actions();
-
-        container(
-            column![
-                tabs,
-                scrollable(content).height(iced::Length::Fill),
-                actions
-            ]
-            .spacing(16)
-        )
-        .padding(24)
-        .into()
-    }
-
-    fn create_tabs(&self) -> Element<SettingsMessage> {
-        let tabs = vec![
-            ("General", SettingsTab::General),
-            ("Appearance", SettingsTab::Appearance),
-            ("Terminal", SettingsTab::Terminal),
-            ("Editor", SettingsTab::Editor),
-            ("Key Bindings", SettingsTab::KeyBindings),
-            ("Performance", SettingsTab::Performance),
-            ("Privacy", SettingsTab::Privacy),
-            ("Plugins", SettingsTab::Plugins),
-        ];
-
-        row(
-            tabs.into_iter()
-                .map(|(label, tab)| {
-                    button(text(label))
-                        .on_press(SettingsMessage::TabChanged(tab.clone()))
-                        .style(if self.active_tab == tab {
-                            button::primary
-                        } else {
-                            button::secondary
-                        })
-                        .into()
-                })
-                .collect::<Vec<_>>()
-        )
-        .spacing(8)
-        .into()
-    }
-
-    fn create_content(&self) -> Element<SettingsMessage> {
-        match self.active_tab {
+        let content = match self.active_tab {
             SettingsTab::General => self.create_general_settings(),
             SettingsTab::Appearance => self.create_appearance_settings(),
             SettingsTab::Terminal => self.create_terminal_settings(),
@@ -262,7 +330,18 @@ impl SettingsView {
             SettingsTab::Performance => self.create_performance_settings(),
             SettingsTab::Privacy => self.create_privacy_settings(),
             SettingsTab::Plugins => self.create_plugin_settings(),
-        }
+            SettingsTab::EnvironmentProfiles => self.create_environment_profiles_settings(),
+        };
+
+        column![
+            text("Settings").size(30),
+            tabs,
+            content,
+            button(text("Save")).on_press(SettingsMessage::Save)
+        ]
+        .spacing(20)
+        .padding(20)
+        .into()
     }
 
     fn create_general_settings(&self) -> Element<SettingsMessage> {
@@ -342,7 +421,7 @@ impl SettingsView {
                 text("Font Size:").width(iced::Length::Fixed(150.0)),
                 slider(8.0..=24.0, self.config.theme.typography.font_size, |size| {
                     // This would need to be handled differently in a real implementation
-                    SettingsMessage::ConfigChanged(ConfigChange::AutoUpdate(true))
+                    SettingsMessage::ConfigChanged(ConfigChange::AutoUpdate(true)) // Placeholder
                 })
             ].spacing(8),
             
@@ -565,27 +644,102 @@ impl SettingsView {
         .into()
     }
 
-    fn create_actions(&self) -> Element<SettingsMessage> {
-        row![
-            button("Reset to Defaults")
-                .on_press(SettingsMessage::ResetToDefaults),
-            button("Import Config")
-                .on_press(SettingsMessage::ImportConfig),
-            button("Export Config")
-                .on_press(SettingsMessage::ExportConfig),
-            // Spacer
-            iced::widget::horizontal_space(iced::Length::Fill),
-            button("Cancel")
-                .on_press(SettingsMessage::Cancel),
-            button("Save")
-                .on_press(SettingsMessage::Save)
-                .style(if self.unsaved_changes {
-                    button::primary
+    fn create_environment_profiles_settings(&self) -> Element<SettingsMessage> {
+        let mut content = column![
+            text("Environment Profiles").size(20),
+            text("Manage sets of environment variables for different sessions.").size(14),
+        ].spacing(16);
+
+        // List of profiles
+        let profile_names: Vec<String> = self.config.env_profiles.profiles.keys().cloned().collect();
+        let active_profile_name = self.config.env_profiles.active_profile.clone();
+
+        content = content.push(
+            row![
+                text("Active Profile:").width(iced::Length::Fixed(150.0)),
+                pick_list(
+                    profile_names.clone(),
+                    active_profile_name,
+                    SettingsMessage::SelectEnvironmentProfile
+                )
+            ].spacing(8)
+        );
+
+        // Profile list and actions
+        let profiles_list = column(
+            profile_names.into_iter().map(|name| {
+                let is_active = self.config.env_profiles.active_profile.as_ref() == Some(&name);
+                let profile_text = if is_active {
+                    format!("{} (Active)", name)
                 } else {
-                    button::secondary
-                }),
-        ]
-        .spacing(8)
-        .into()
+                    name.clone()
+                };
+                
+                row![
+                    text(profile_text).width(iced::Length::Fill),
+                    button("Edit").on_press(SettingsMessage::EditEnvironmentProfile(Some(name.clone()))),
+                    button("Delete").on_press(SettingsMessage::DeleteEnvironmentProfile(name.clone())),
+                ].spacing(8).into()
+            }).collect::<Vec<_>>()
+        ).spacing(4);
+
+        content = content.push(profiles_list);
+        content = content.push(
+            button("Add New Profile")
+                .on_press(SettingsMessage::EditEnvironmentProfile(None))
+        );
+
+        // Environment Profile Editor
+        if let Some(editing_profile) = &self.editing_env_profile {
+            let mut editor_column = column![
+                text(format!("Editing Profile: {}", editing_profile.name)).size(18),
+                row![
+                    text("Profile Name:").width(iced::Length::Fixed(120.0)),
+                    text_input(
+                        "Profile Name",
+                        &editing_profile.name
+                    )
+                    .on_input(SettingsMessage::EnvironmentProfileNameChanged)
+                ].spacing(8),
+                text("Variables:").size(16),
+            ].spacing(10);
+
+            // Sort variables for consistent display
+            let mut sorted_vars: Vec<(&String, &String)> = editing_profile.variables.iter().collect();
+            sorted_vars.sort_by_key(|(k, _)| *k);
+
+            for (index, (key, value)) in sorted_vars.iter().enumerate() {
+                editor_column = editor_column.push(
+                    row![
+                        text_input("Key", key)
+                            .on_input(move |s| SettingsMessage::EnvironmentVariableKeyChanged(index, s))
+                            .width(iced::Length::FillPortion(1)),
+                        text_input("Value", value)
+                            .on_input(move |s| SettingsMessage::EnvironmentVariableValueChanged(index, s))
+                            .width(iced::Length::FillPortion(2)),
+                        button("Remove").on_press(SettingsMessage::RemoveEnvironmentVariable(index)),
+                    ].spacing(8)
+                );
+            }
+
+            editor_column = editor_column.push(
+                button("Add Variable").on_press(SettingsMessage::AddEnvironmentVariable)
+            );
+
+            editor_column = editor_column.push(
+                row![
+                    button("Save Profile").on_press(SettingsMessage::SaveEnvironmentProfile),
+                    button("Cancel").on_press(SettingsMessage::CancelEditEnvironmentProfile),
+                ].spacing(8)
+            );
+
+            if let Some(error) = &self.env_profile_error {
+                editor_column = editor_column.push(text(error).color(iced::Color::from_rgb(1.0, 0.0, 0.0)));
+            }
+
+            content = content.push(container(editor_column).padding(16).style(container::Style::Box));
+        }
+
+        content.into()
     }
 }

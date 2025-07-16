@@ -1,10 +1,9 @@
-name: "Docker System Cleanup"
-description: "Clean up Docker containers, images, and volumes"
+name: "Docker Cleanup"
+description: "Cleans up unused Docker resources."
 command: |
   echo "Cleaning up Docker resources..."
   docker container prune -f
   docker image prune -f
-  docker volume prune -f
   {{#if networks}}docker network prune -f{{/if}}
   echo "Docker cleanup completed!"
 tags: ["docker", "cleanup", "maintenance"]
@@ -16,3 +15,8 @@ arguments:
     default_value: "false"
     arg_type: boolean
     required: false
+steps:
+  - name: Prune Docker system
+    command: docker system prune -f
+  - name: Prune Docker volumes
+    command: docker volume prune -f
