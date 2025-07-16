@@ -1621,6 +1621,7 @@ async fn main() -> Result<()> {
     settings::keybinding_editor::init();
     settings::theme_editor::init();
     settings::yaml_theme_ui::init();
+    settings::appearance_settings::init(); // Initialize new module
     shell::init();
     ai::init(); // Initialize the new AI module
 

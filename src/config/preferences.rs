@@ -160,6 +160,16 @@ pub struct UiPreferences {
     pub reduce_motion: bool,
     pub high_contrast: bool,
     pub zoom_level: f32,
+    // New fields for Appearance settings
+    pub sync_with_os_theme: bool,
+    pub app_icon: String, // e.g., "Default", "Custom1"
+    pub open_new_windows_custom_size: bool,
+    pub window_opacity: f32,
+    pub window_blur_radius: f32,
+    pub input_type: InputType,
+    pub input_position: InputPosition,
+    pub dim_inactive_panes: bool,
+    pub focus_follows_mouse: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,7 +221,7 @@ pub struct KeyBinding {
     pub when: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Modifier {
     Ctrl,
     Alt,
@@ -251,6 +261,19 @@ pub struct PluginConfig {
     pub plugin_settings: HashMap<String, serde_json::Value>,
     pub auto_update_plugins: bool,
     pub allow_unsigned_plugins: bool,
+}
+
+// New enums for Appearance settings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputType {
+    Universal,
+    Classic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputPosition {
+    PinToBottom,
+    // Add other options if needed, e.g., Floating
 }
 
 impl Default for UserPreferences {
@@ -387,6 +410,16 @@ impl Default for UiPreferences {
             reduce_motion: false,
             high_contrast: false,
             zoom_level: 1.0,
+            // Default values for new fields
+            sync_with_os_theme: true,
+            app_icon: "Default".to_string(),
+            open_new_windows_custom_size: false,
+            window_opacity: 1.0, // Represents 100%
+            window_blur_radius: 1.0,
+            input_type: InputType::Universal,
+            input_position: InputPosition::PinToBottom,
+            dim_inactive_panes: false,
+            focus_follows_mouse: false,
         }
     }
 }
