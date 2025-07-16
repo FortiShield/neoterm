@@ -47,6 +47,8 @@ pub struct UserPreferences {
     pub ai_provider_type: String, // New field for AI provider type
     pub fallback_ai_provider_type: Option<String>, // New: Fallback AI provider type
     pub fallback_ai_model: Option<String>, // New: Fallback AI model
+    pub redact_sensitive_info: bool, // New: Redact sensitive info before sending to AI
+    pub local_only_ai_mode: bool, // New: Force AI to use local models only
     pub keybindings_file: String,
     pub enable_performance_profiling: bool,
     pub enable_wasm_plugins: bool,
@@ -296,6 +298,8 @@ impl Default for UserPreferences {
             ai_provider_type: "openai".to_string(), // Default to OpenAI
             fallback_ai_provider_type: Some("ollama".to_string()), // Default fallback to Ollama
             fallback_ai_model: Some("llama2".to_string()), // Default fallback model
+            redact_sensitive_info: true, // Default to true for privacy
+            local_only_ai_mode: false, // Default to false, allow cloud AI
             keybindings_file: "keybindings.yaml".to_string(),
             enable_performance_profiling: true,
             enable_wasm_plugins: true,

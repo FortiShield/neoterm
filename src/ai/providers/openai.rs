@@ -6,12 +6,20 @@ use tokio::sync::mpsc;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap; // For current_tool_calls
 
 #[derive(Debug, Clone)]
 pub struct OpenAIProvider {
     api_key: String,
     model: String,
     client: Client,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsageResponse {
+    pub total_granted: f64,
+    pub total_used: f64,
+    pub total_available: f64,
 }
 
 impl OpenAIProvider {
@@ -22,6 +30,16 @@ impl OpenAIProvider {
             model,
             client: Client::new(),
         })
+    }
+
+    pub async fn get_usage_quota(&self) -> Result<UsageResponse> {
+        let response = self.client.get("https://api.openai.com/v1/dashboard/billing/credit_grants")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await?
+            .json::<UsageResponse>()
+            .await?;
+        Ok(response)
     }
 }
 

@@ -1,52 +1,118 @@
+use crate::command::CommandManager;
+use crate::virtual_fs::VirtualFileSystem;
+use crate::watcher::Watcher;
 use anyhow::Result;
-use std::collections::HashMap;
-use std::env;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct AIContext {
-    pub cwd: String,
-    pub env_vars: Option<HashMap<String, String>>,
+    command_manager: Arc<CommandManager>,
+    virtual_file_system: Arc<VirtualFileSystem>,
+    watcher: Arc<Watcher>,
+    pub current_working_directory: Option<PathBuf>,
     pub recent_commands: Vec<String>,
-    pub selected_text: Option<String>,
-    // Add more context fields as needed, e.g., open files, terminal output, etc.
+    pub file_system_summary: String,
+    pub redact_sensitive_info: bool, // New field to control redaction
 }
 
 impl AIContext {
-    pub fn new() -> Self {
+    pub fn new(command_manager: Arc<CommandManager>, virtual_file_system: Arc<VirtualFileSystem>, watcher: Arc<Watcher>, redact_sensitive_info: bool) -> Self {
         Self {
-            cwd: String::new(),
-            env_vars: None,
+            command_manager,
+            virtual_file_system,
+            watcher,
+            current_working_directory: None,
             recent_commands: Vec::new(),
-            selected_text: None,
+            file_system_summary: String::new(),
+            redact_sensitive_info,
         }
     }
 
     pub async fn update_current_state(&mut self) -> Result<()> {
-        // Update Current Working Directory
-        self.cwd = env::current_dir()?
-            .to_string_lossy()
-            .into_owned();
+        // Update current working directory
+        self.current_working_directory = std::env::current_dir().ok();
 
-        // Update Environment Variables (consider filtering sensitive ones)
-        let env_map: HashMap<String, String> = env::vars().collect();
-        self.env_vars = Some(env_map);
+        // Update recent commands (simplified, assuming CommandManager tracks this)
+        // In a real scenario, CommandManager would expose a method to get recent commands.
+        // For now, let's simulate it or fetch from a history file if available.
+        // self.recent_commands = self.command_manager.get_recent_commands().await?;
 
-        // TODO: Implement mechanisms to get recent commands and selected text from the terminal UI/shell
-        // For now, these are placeholders.
-        // self.recent_commands = get_recent_commands_from_shell_history().await?;
-        // self.selected_text = get_selected_text_from_ui().await?;
+        // Update file system summary
+        let fs_summary = self.virtual_file_system.get_summary().await?;
+        self.file_system_summary = self.redact_file_system_summary(&fs_summary);
 
         Ok(())
     }
 
-    pub fn add_recent_command(&mut self, command: String) {
-        self.recent_commands.push(command);
-        // Keep history limited, e.g., to last 10 commands
-        if self.recent_commands.len() > 10 {
-            self.recent_commands.remove(0);
+    fn redact_file_system_summary(&self, summary: &str) -> String {
+        if !self.redact_sensitive_info {
+            return summary.to_string();
         }
-    }
 
-    pub fn set_selected_text(&mut self, text: Option<String>) {
-        self.selected_text = text;
+        let sensitive_patterns = [
+            ".git",
+            "node_modules",
+            "target",
+            "dist",
+            "build",
+            "__pycache__",
+            ".env",
+            ".ssh",
+            ".aws",
+            "secrets",
+            "private",
+            "temp",
+            "tmp",
+            "cache",
+            "logs",
+            "node_modules",
+            "vendor",
+            "bin",
+            "obj",
+            "out",
+            "coverage",
+            "test-results",
+            "backup",
+            "archive",
+            "dump",
+            "db",
+            "database",
+            "config.json",
+            "credentials.json",
+            "api_keys.txt",
+            "password.txt",
+            "token.txt",
+            "id_rsa", // Common SSH key name
+            "id_dsa", // Common SSH key name
+            "id_ecdsa", // Common SSH key name
+            "id_ed25519", // Common SSH key name
+        ];
+
+        let mut redacted_summary = summary.to_string();
+        for pattern in &sensitive_patterns {
+            // Replace full path segments or file names
+            redacted_summary = redacted_summary.replace(
+                &format!("/{}", pattern),
+                &format!("/[REDACTED_{}]", pattern.to_uppercase().replace(".", "").replace("-", "_"))
+            );
+            redacted_summary = redacted_summary.replace(
+                &format!("\\{}", pattern),
+                &format!("\\[REDACTED_{}]", pattern.to_uppercase().replace(".", "").replace("-", "_"))
+            );
+            redacted_summary = redacted_summary.replace(
+                &format!(" {}", pattern), // For file names at the end of a line
+                &format!(" [REDACTED_{}]", pattern.to_uppercase().replace(".", "").replace("-", "_"))
+            );
+            redacted_summary = redacted_summary.replace(
+                &format!("{}\n", pattern), // For file names at the end of a line
+                &format!("[REDACTED_{}]\n", pattern.to_uppercase().replace(".", "").replace("-", "_"))
+            );
+            redacted_summary = redacted_summary.replace(
+                &format!("{}\r\n", pattern), // For file names at the end of a line (Windows)
+                &format!("[REDACTED_{}]\r\n", pattern.to_uppercase().replace(".", "").replace("-", "_"))
+            );
+        }
+        redacted_summary
     }
 }

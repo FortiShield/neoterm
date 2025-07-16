@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use serde_json::Value;
 use crate::workflows::Workflow; // Import Workflow struct
+use regex::Regex; // For redaction
 
 pub struct Assistant {
     primary_provider: Box<dyn AIProvider + Send + Sync>,
@@ -14,16 +15,23 @@ pub struct Assistant {
     prompt_builder: PromptBuilder,
     context: AIContext,
     pub conversation_history: Vec<ChatMessage>, // Made public for AgentMode to manage
+    redact_sensitive_info: bool, // New: Control redaction
+    local_only_ai_mode: bool, // New: Force local AI models
 }
 
 impl Assistant {
     pub fn new(
+        command_manager: Arc<CommandManager>, // Added for AIContext
+        virtual_file_system: Arc<VirtualFileSystem>, // Added for AIContext
+        watcher: Arc<Watcher>, // Added for AIContext
         primary_provider_type: &str,
         primary_api_key: Option<String>,
         primary_model: String,
         fallback_provider_type: Option<String>,
         fallback_api_key: Option<String>, // Fallback API key might be different
         fallback_model: Option<String>,
+        redact_sensitive_info: bool, // New
+        local_only_ai_mode: bool, // New
     ) -> Result<Self> {
         let primary_provider: Box<dyn AIProvider + Send + Sync> = match primary_provider_type {
             "openai" => Box::new(OpenAIProvider::new(primary_api_key, primary_model)?),
@@ -55,14 +63,55 @@ impl Assistant {
             primary_provider,
             fallback_provider,
             prompt_builder: PromptBuilder::new(),
-            context: AIContext::new(),
+            context: AIContext::new(command_manager, virtual_file_system, watcher, redact_sensitive_info), // Pass redact_sensitive_info
             conversation_history: Vec::new(),
+            redact_sensitive_info, // Store preference
+            local_only_ai_mode, // Store preference
         })
     }
 
+    // Helper to redact sensitive information from a ChatMessage
+    fn redact_chat_message(&self, mut message: ChatMessage) -> ChatMessage {
+        if !self.redact_sensitive_info {
+            return message;
+        }
+
+        if let Some(content) = message.content.as_mut() {
+            // Regex for common API keys/tokens (simplified, can be expanded)
+            let api_key_regex = Regex::new(r"(sk-[a-zA-Z0-9]{32,}|[A-Za-z0-9]{32,}_[A-Za-z0-9]{32,})").unwrap();
+            *content = api_key_regex.replace_all(content, "[REDACTED_API_KEY]").to_string();
+
+            // Regex for common environment variables (e.g., VAR=value)
+            let env_var_regex = Regex::new(r"([A-Z_]+)=([a-zA-Z0-9_.-]+)").unwrap();
+            *content = env_var_regex.replace_all(content, "$1=[REDACTED_ENV_VAR]").to_string();
+
+            // Redact common sensitive file paths if they appear in content
+            let sensitive_path_regex = Regex::new(r"(/home/[^/]+/\.ssh|/root/\.ssh|/etc/secrets|/var/lib/jenkins/secrets|~/\.aws/credentials)").unwrap();
+            *content = sensitive_path_regex.replace_all(content, "[REDACTED_PATH]").to_string();
+        }
+        message
+    }
+
     async fn try_chat_completion(&self, messages: Vec<ChatMessage>, tools: Option<Value>) -> Result<ChatMessage> {
+        let redacted_messages: Vec<ChatMessage> = messages.into_iter().map(|msg| self.redact_chat_message(msg)).collect();
+
+        // Check local_only_ai_mode for primary provider
+        if self.local_only_ai_mode && self.primary_provider.name() != "Ollama" { // Assuming Ollama is the primary local provider
+            log::warn!("Local-only AI mode is enabled. Skipping primary cloud provider ({}).", self.primary_provider.name());
+            if let Some(fb_provider) = &self.fallback_provider {
+                if fb_provider.name() == "Ollama" {
+                    log::info!("Attempting chat completion with local fallback provider ({}).", fb_provider.name());
+                    return fb_provider.chat_completion(redacted_messages, tools).await;
+                } else {
+                    return Err(anyhow!("Local-only AI mode is enabled, and neither primary nor fallback is a local provider."));
+                }
+            } else {
+                return Err(anyhow!("Local-only AI mode is enabled, but no local fallback provider is configured."));
+            }
+        }
+
         // Try primary provider first
-        match self.primary_provider.chat_completion(messages.clone(), tools.clone()).await {
+        match self.primary_provider.chat_completion(redacted_messages.clone(), tools.clone()).await {
             Ok(response) => {
                 log::debug!("Chat completion successful with primary provider: {}", self.primary_provider.name());
                 Ok(response)
@@ -70,7 +119,11 @@ impl Assistant {
             Err(e) => {
                 log::warn!("Primary AI provider ({}) failed: {}. Attempting fallback...", self.primary_provider.name(), e);
                 if let Some(fb_provider) = &self.fallback_provider {
-                    match fb_provider.chat_completion(messages, tools).await {
+                    // Check local_only_ai_mode for fallback provider
+                    if self.local_only_ai_mode && fb_provider.name() != "Ollama" {
+                        return Err(anyhow!("Local-only AI mode is enabled, and fallback provider ({}) is not local.", fb_provider.name()));
+                    }
+                    match fb_provider.chat_completion(redacted_messages, tools).await {
                         Ok(response) => {
                             log::info!("Chat completion successful with fallback provider: {}", fb_provider.name());
                             Ok(response)
@@ -88,8 +141,25 @@ impl Assistant {
     }
 
     async fn try_stream_chat_completion(&self, messages: Vec<ChatMessage>, tools: Option<Value>) -> Result<mpsc::Receiver<ChatMessage>> {
+        let redacted_messages: Vec<ChatMessage> = messages.into_iter().map(|msg| self.redact_chat_message(msg)).collect();
+
+        // Check local_only_ai_mode for primary provider
+        if self.local_only_ai_mode && self.primary_provider.name() != "Ollama" { // Assuming Ollama is the primary local provider
+            log::warn!("Local-only AI mode is enabled. Skipping primary cloud provider ({}).", self.primary_provider.name());
+            if let Some(fb_provider) = &self.fallback_provider {
+                if fb_provider.name() == "Ollama" {
+                    log::info!("Attempting stream chat completion with local fallback provider ({}).", fb_provider.name());
+                    return fb_provider.stream_chat_completion(redacted_messages, tools).await;
+                } else {
+                    return Err(anyhow!("Local-only AI mode is enabled, and neither primary nor fallback is a local provider."));
+                }
+            } else {
+                return Err(anyhow!("Local-only AI mode is enabled, but no local fallback provider is configured."));
+            }
+        }
+
         // Try primary provider first
-        match self.primary_provider.stream_chat_completion(messages.clone(), tools.clone()).await {
+        match self.primary_provider.stream_chat_completion(redacted_messages.clone(), tools.clone()).await {
             Ok(receiver) => {
                 log::debug!("Stream chat completion successful with primary provider: {}", self.primary_provider.name());
                 Ok(receiver)
@@ -97,7 +167,11 @@ impl Assistant {
             Err(e) => {
                 log::warn!("Primary AI provider ({}) stream failed: {}. Attempting fallback...", self.primary_provider.name(), e);
                 if let Some(fb_provider) = &self.fallback_provider {
-                    match fb_provider.stream_chat_completion(messages, tools).await {
+                    // Check local_only_ai_mode for fallback provider
+                    if self.local_only_ai_mode && fb_provider.name() != "Ollama" {
+                        return Err(anyhow!("Local-only AI mode is enabled, and fallback provider ({}) is not local.", fb_provider.name()));
+                    }
+                    match fb_provider.stream_chat_completion(redacted_messages, tools).await {
                         Ok(receiver) => {
                             log::info!("Stream chat completion successful with fallback provider: {}", fb_provider.name());
                             Ok(receiver)
@@ -241,11 +315,33 @@ impl Assistant {
         Ok(workflow)
     }
 
+    pub async fn get_usage_quota(&self) -> Result<String> {
+        if self.primary_provider.name() == "OpenAI" {
+            let openai_provider = self.primary_provider.as_any().downcast_ref::<OpenAIProvider>()
+                .ok_or_else(|| anyhow!("Primary provider is not OpenAI"))?;
+            let usage = openai_provider.get_usage_quota().await?;
+            Ok(format!("OpenAI Usage: Total: ${:.2}, Used: ${:.2}, Remaining: ${:.2}", usage.total_granted, usage.total_used, usage.total_available))
+        } else {
+            Err(anyhow!("Usage quota is only available for OpenAI provider."))
+        }
+    }
+
     pub fn get_history(&self) -> &Vec<ChatMessage> {
         &self.conversation_history
     }
 
     pub fn clear_history(&mut self) {
         self.conversation_history.clear();
+    }
+}
+
+// Helper trait to downcast AIProvider
+trait AsAny {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: AIProvider + 'static> AsAny for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
