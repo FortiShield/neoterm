@@ -1,6 +1,7 @@
 use iced::{Element, widget::{column, row, text, button, text_input, scrollable, pick_list, container}};
 use crate::config::yaml_theme_manager::{YamlThemeManager, ThemeMetadata};
-use crate::config::{ThemeConfig, yaml_theme::YamlThemeError};
+use crate::config::{ThemeConfig, yaml_theme::{YamlTheme, YamlColors, YamlThemeError}};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct YamlThemeUI {
@@ -13,6 +14,7 @@ pub struct YamlThemeUI {
     show_export_dialog: bool,
     import_error: Option<String>,
     search_query: String,
+    theme_editor: YamlThemeEditor,
 }
 
 #[derive(Debug, Clone)]
@@ -30,12 +32,23 @@ pub enum Message {
     ShowImportDialog(bool),
     ShowExportDialog(bool),
     ClearError,
+    ThemeNameChanged(String),
+    BackgroundColorChanged(String),
+    ForegroundColorChanged(String),
+    PrimaryColorChanged(String),
+    SecondaryColorChanged(String),
+    DangerColorChanged(String),
+    TextColorChanged(String),
+    BorderColorChanged(String),
+    LoadTheme(String),
+    SaveTheme,
 }
 
 impl YamlThemeUI {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let theme_manager = YamlThemeManager::new()?;
         let theme_metadata = theme_manager.get_all_metadata();
+        let theme_editor = YamlThemeEditor::new();
 
         Ok(Self {
             theme_manager,
@@ -47,6 +60,7 @@ impl YamlThemeUI {
             show_export_dialog: false,
             import_error: None,
             search_query: String::new(),
+            theme_editor,
         })
     }
 
@@ -130,7 +144,46 @@ impl YamlThemeUI {
                 self.import_error = None;
                 None
             }
-            _ => None,
+            Message::ThemeNameChanged(name) => {
+                self.theme_editor.update(Message::ThemeNameChanged(name));
+                None
+            }
+            Message::BackgroundColorChanged(color) => {
+                self.theme_editor.update(Message::BackgroundColorChanged(color));
+                None
+            }
+            Message::ForegroundColorChanged(color) => {
+                self.theme_editor.update(Message::ForegroundColorChanged(color));
+                None
+            }
+            Message::PrimaryColorChanged(color) => {
+                self.theme_editor.update(Message::PrimaryColorChanged(color));
+                None
+            }
+            Message::SecondaryColorChanged(color) => {
+                self.theme_editor.update(Message::SecondaryColorChanged(color));
+                None
+            }
+            Message::DangerColorChanged(color) => {
+                self.theme_editor.update(Message::DangerColorChanged(color));
+                None
+            }
+            Message::TextColorChanged(color) => {
+                self.theme_editor.update(Message::TextColorChanged(color));
+                None
+            }
+            Message::BorderColorChanged(color) => {
+                self.theme_editor.update(Message::BorderColorChanged(color));
+                None
+            }
+            Message::LoadTheme(name) => {
+                self.theme_editor.update(Message::LoadTheme(name));
+                None
+            }
+            Message::SaveTheme => {
+                self.theme_editor.update(Message::SaveTheme);
+                None
+            }
         }
     }
 
@@ -138,7 +191,7 @@ impl YamlThemeUI {
         self.theme_metadata = self.theme_manager.get_all_metadata();
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&mut self) -> Element<Message> {
         let main_content = column![
             self.create_header(),
             self.create_theme_list(),
@@ -151,7 +204,11 @@ impl YamlThemeUI {
         } else if self.show_export_dialog {
             self.create_export_dialog()
         } else {
-            main_content.into()
+            column![
+                main_content,
+                self.theme_editor.view(),
+            ]
+            .into()
         }
     }
 
@@ -297,3 +354,175 @@ impl YamlThemeUI {
                 ..Default::default()
             })
             .into()
+    }
+
+    fn create_import_dialog(&self) -> Element<Message> {
+        column![
+            text("Import Theme").size(20),
+            text_input("Paste YAML here...", &self.import_text)
+                .on_input(Message::ImportTextChanged)
+                .width(iced::Length::Fill),
+            button("Import from Text")
+                .on_press(Message::ImportFromText),
+            button("Import from File")
+                .on_press(Message::ImportFromFile),
+            button("Cancel")
+                .on_press(Message::ShowImportDialog(false)),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn create_export_dialog(&self) -> Element<Message> {
+        column![
+            text("Export Theme").size(20),
+            text(&self.export_text)
+                .width(iced::Length::Fill),
+            button("Export to File")
+                .on_press(Message::ExportToFile(ThemeConfig::new())),
+            button("Cancel")
+                .on_press(Message::ShowExportDialog(false)),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn create_actions(&self) -> Element<Message> {
+        row![
+            button("Export")
+                .on_press(Message::ShowExportDialog(true)),
+            button("Edit")
+                .on_press(Message::LoadTheme("Custom Theme".to_string())),
+        ]
+        .spacing(8)
+        .into()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct YamlThemeEditor {
+    pub current_theme: YamlTheme,
+    // Add fields for editing individual color strings
+    background_input: String,
+    foreground_input: String,
+    primary_input: String,
+    secondary_input: String,
+    danger_input: String,
+    text_input: String,
+    border_input: String,
+}
+
+impl YamlThemeEditor {
+    pub fn new() -> Self {
+        let default_theme = YamlTheme {
+            name: "Custom Theme".to_string(),
+            colors: YamlColors {
+                background: "#F0F0F0".to_string(),
+                foreground: "#000000".to_string(),
+                primary: "#0078D7".to_string(),
+                secondary: "#646464".to_string(),
+                danger: "#C80000".to_string(),
+                text: "#000000".to_string(),
+                border: "#C8C8C8".to_string(),
+            },
+        };
+        Self::from_theme(default_theme)
+    }
+
+    fn from_theme(theme: YamlTheme) -> Self {
+        Self {
+            background_input: theme.colors.background.clone(),
+            foreground_input: theme.colors.foreground.clone(),
+            primary_input: theme.colors.primary.clone(),
+            secondary_input: theme.colors.secondary.clone(),
+            danger_input: theme.colors.danger.clone(),
+            text_input: theme.colors.text.clone(),
+            border_input: theme.colors.border.clone(),
+            current_theme: theme,
+        }
+    }
+
+    pub fn update(&mut self, message: Message) {
+        match message {
+            Message::ThemeNameChanged(name) => self.current_theme.name = name,
+            Message::BackgroundColorChanged(color) => {
+                self.background_input = color.clone();
+                self.current_theme.colors.background = color;
+            }
+            Message::ForegroundColorChanged(color) => {
+                self.foreground_input = color.clone();
+                self.current_theme.colors.foreground = color;
+            }
+            Message::PrimaryColorChanged(color) => {
+                self.primary_input = color.clone();
+                self.current_theme.colors.primary = color;
+            }
+            Message::SecondaryColorChanged(color) => {
+                self.secondary_input = color.clone();
+                self.current_theme.colors.secondary = color;
+            }
+            Message::DangerColorChanged(color) => {
+                self.danger_input = color.clone();
+                self.current_theme.colors.danger = color;
+            }
+            Message::TextColorChanged(color) => {
+                self.text_input = color.clone();
+                self.current_theme.colors.text = color;
+            }
+            Message::BorderColorChanged(color) => {
+                self.border_input = color.clone();
+                self.current_theme.colors.border = color;
+            }
+            Message::LoadTheme(name) => {
+                // In a real app, you'd load from YamlThemeManager
+                // For now, just a placeholder
+            }
+            Message::SaveTheme => {
+                // In a real app, you'd save to a file
+                let yaml_string = serde_yaml::to_string(&self.current_theme).unwrap();
+                println!("Saved Theme:\n{}", yaml_string);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn view(&mut self) -> Element<Message> {
+        let color_input = |label: &str, value: &str, on_change: fn(String) -> Message| {
+            row![
+                text(label).width(iced::Length::Units(100)),
+                text_input("", value)
+                    .on_input(on_change)
+                    .padding(5)
+                    .width(iced::Length::Fill),
+            ]
+            .spacing(10)
+            .align_items(iced::Alignment::Center)
+            .into()
+        };
+
+        column![
+            text("YAML Theme Editor").size(20),
+            row![
+                text("Theme Name:").width(iced::Length::Units(100)),
+                text_input("Custom Theme", &self.current_theme.name)
+                    .on_input(Message::ThemeNameChanged)
+                    .padding(5)
+                    .width(iced::Length::Fill),
+            ]
+            .spacing(10)
+            .align_items(iced::Alignment::Center),
+            
+            color_input("Background:", &self.background_input, Message::BackgroundColorChanged),
+            color_input("Foreground:", &self.foreground_input, Message::ForegroundColorChanged),
+            color_input("Primary:", &self.primary_input, Message::PrimaryColorChanged),
+            color_input("Secondary:", &self.secondary_input, Message::SecondaryColorChanged),
+            color_input("Danger:", &self.danger_input, Message::DangerColorChanged),
+            color_input("Text:", &self.text_input, Message::TextColorChanged),
+            color_input("Border:", &self.border_input, Message::BorderColorChanged),
+
+            button(text("Save Theme")).on_press(Message::SaveTheme),
+        ]
+        .spacing(10)
+        .into()
+    }
+}

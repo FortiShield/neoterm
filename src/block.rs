@@ -1,51 +1,42 @@
-use iced::{Element, Length, widget::{column, row, text, container, button, scrollable}};
-use iced::alignment::{Horizontal, Vertical};
+use iced::{
+    widget::{column, container, row, text, button, scrollable},
+    Element, Length, Color, alignment,
+};
 use uuid::Uuid;
-
-#[derive(Debug, Clone)]
-pub struct Block {
-    pub id: String,
-    pub content: BlockContent,
-    pub is_collapsed: bool,
-    pub is_error: bool,
-    scroll_offset: scrollable::State,
-}
+use chrono::{DateTime, Local};
 
 #[derive(Debug, Clone)]
 pub enum BlockContent {
     Command {
         input: String,
-        output_stdout: String,
-        output_stderr: String,
+        output: Vec<(String, bool)>, // (content, is_stdout)
         status: String,
+        error: bool,
+        start_time: DateTime<Local>,
+        end_time: Option<DateTime<Local>>,
+    },
+    AgentMessage {
+        content: String,
+        is_user: bool,
+        timestamp: DateTime<Local>,
     },
     Info {
         title: String,
         message: String,
-    },
-    AgentMessage {
-        content: String,
-    },
-    UserMessage {
-        content: String,
-    },
-    Output {
-        output_stdout: String,
-        output_stderr: String,
-        status: String,
+        timestamp: DateTime<Local>,
     },
     Error {
         message: String,
+        timestamp: DateTime<Local>,
     },
+    // Add other block types as needed (e.g., Code, Image, Workflow)
 }
 
 #[derive(Debug, Clone)]
-pub enum BlockMessage {
-    Copy,
-    Rerun,
-    Delete,
-    Export,
-    ToggleCollapse,
+pub struct Block {
+    pub id: String,
+    pub content: BlockContent,
+    pub collapsed: bool,
 }
 
 impl Block {
@@ -54,224 +45,192 @@ impl Block {
             id: Uuid::new_v4().to_string(),
             content: BlockContent::Command {
                 input,
-                output_stdout: String::new(),
-                output_stderr: String::new(),
+                output: Vec::new(),
                 status: "Running...".to_string(),
+                error: false,
+                start_time: Local::now(),
+                end_time: None,
             },
-            is_collapsed: false,
-            is_error: false,
-            scroll_offset: scrollable::State::new(),
-        }
-    }
-
-    pub fn new_info(title: String, message: String) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            content: BlockContent::Info { title, message },
-            is_collapsed: false,
-            is_error: false,
-            scroll_offset: scrollable::State::new(),
-        }
-    }
-
-    pub fn new_output(initial_status: String) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            content: BlockContent::Output {
-                output_stdout: String::new(),
-                output_stderr: String::new(),
-                status: initial_status,
-            },
-            is_collapsed: false,
-            is_error: false,
-            scroll_offset: scrollable::State::new(),
-        }
-    }
-
-    pub fn new_error(message: String) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            content: BlockContent::Error { message },
-            is_collapsed: false,
-            is_error: true,
-            scroll_offset: scrollable::State::new(),
+            collapsed: false,
         }
     }
 
     pub fn new_agent_message(content: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            content: BlockContent::AgentMessage { content },
-            is_collapsed: false,
-            is_error: false,
-            scroll_offset: scrollable::State::new(),
+            content: BlockContent::AgentMessage {
+                content,
+                is_user: false,
+                timestamp: Local::now(),
+            },
+            collapsed: false,
         }
     }
 
     pub fn new_user_message(content: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            content: BlockContent::UserMessage { content },
-            is_collapsed: false,
-            is_error: false,
-            scroll_offset: scrollable::State::new(),
+            content: BlockContent::AgentMessage {
+                content,
+                is_user: true,
+                timestamp: Local::now(),
+            },
+            collapsed: false,
         }
     }
 
+    pub fn new_info(title: String, message: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            content: BlockContent::Info {
+                title,
+                message,
+                timestamp: Local::now(),
+            },
+            collapsed: false,
+        }
+    }
+
+    pub fn new_error(message: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            content: BlockContent::Error {
+                message,
+                timestamp: Local::now(),
+            },
+            collapsed: false,
+        }
+    }
+
+    pub fn new_output(initial_output: String) -> Self {
+        let mut block = Self::new_command("".to_string()); // Use command block for output
+        if let BlockContent::Command { output, .. } = &mut block.content {
+            output.push((initial_output, true));
+        }
+        block
+    }
+
     pub fn add_output_line(&mut self, line: String, is_stdout: bool) {
-        match &mut self.content {
-            BlockContent::Command { output_stdout, output_stderr, .. } => {
-                if is_stdout {
-                    output_stdout.push_str(&line);
-                } else {
-                    output_stderr.push_str(&line);
-                }
-            }
-            BlockContent::Output { output_stdout, output_stderr, .. } => {
-                if is_stdout {
-                    output_stdout.push_str(&line);
-                } else {
-                    output_stderr.push_str(&line);
-                }
-            }
-            _ => {}
+        if let BlockContent::Command { output, .. } = &mut self.content {
+            output.push((line, is_stdout));
         }
     }
 
     pub fn set_status(&mut self, status: String) {
-        match &mut self.content {
-            BlockContent::Command { status: s, .. } => *s = status,
-            BlockContent::Output { status: s, .. } => *s = status,
-            _ => {}
+        if let BlockContent::Command { status: s, end_time, .. } = &mut self.content {
+            *s = status;
+            *end_time = Some(Local::now());
         }
     }
 
-    pub fn set_error(&mut self, is_error: bool) {
-        self.is_error = is_error;
+    pub fn set_error(&mut self, error: bool) {
+        if let BlockContent::Command { error: e, .. } = &mut self.content {
+            *e = error;
+        }
     }
 
     pub fn toggle_collapse(&mut self) {
-        self.is_collapsed = !self.is_collapsed;
+        self.collapsed = !self.collapsed;
     }
 
-    pub fn view(&self) -> Element<BlockMessage> {
-        let header = match &self.content {
-            BlockContent::Command { input, status, .. } => {
-                row![
-                    text(input).size(16).width(Length::Fill),
-                    text(status).size(14).style(|theme| {
-                        if self.is_error {
-                            iced::widget::text::Appearance { color: Some(theme.palette().danger) }
-                        } else if status.contains("Running") {
-                            iced::widget::text::Appearance { color: Some(theme.palette().primary) }
-                        } else {
-                            iced::widget::text::Appearance { color: Some(theme.palette().text) }
-                        }
-                    }),
-                    button(text(if self.is_collapsed { "▶" } else { "▼" }))
-                        .on_press(BlockMessage::ToggleCollapse)
-                ]
-            }
-            BlockContent::Info { title, .. } => {
-                row![
-                    text(title).size(16).width(Length::Fill),
-                    button(text(if self.is_collapsed { "▶" } else { "▼" }))
-                        .on_press(BlockMessage::ToggleCollapse)
-                ]
-            }
-            BlockContent::AgentMessage { .. } => {
-                row![
-                    text("🤖 Agent Response").size(16).width(Length::Fill),
-                    button(text(if self.is_collapsed { "▶" } else { "▼" }))
-                        .on_press(BlockMessage::ToggleCollapse)
-                ]
-            }
-            BlockContent::UserMessage { .. } => {
-                row![
-                    text("👤 User Input").size(16).width(Length::Fill),
-                    button(text(if self.is_collapsed { "▶" } else { "▼" }))
-                        .on_press(BlockMessage::ToggleCollapse)
-                ]
-            }
-            BlockContent::Output { status, .. } => {
-                row![
-                    text("Output").size(16).width(Length::Fill),
-                    text(status).size(14).style(|theme| {
-                        if self.is_error {
-                            iced::widget::text::Appearance { color: Some(theme.palette().danger) }
-                        } else {
-                            iced::widget::text::Appearance { color: Some(theme.palette().text) }
-                        }
-                    }),
-                    button(text(if self.is_collapsed { "▶" } else { "▼" }))
-                        .on_press(BlockMessage::ToggleCollapse)
-                ]
-            }
-            BlockContent::Error { .. } => {
-                row![
-                    text("Error").size(16).width(Length::Fill),
-                    button(text(if self.is_collapsed { "▶" } else { "▼" }))
-                        .on_press(BlockMessage::ToggleCollapse)
-                ]
-            }
-        }
-        .align_items(Vertical::Center)
-        .spacing(8);
+    pub fn view(&self) -> Element<crate::Message> {
+        let id_text = text(format!("#{}", &self.id[0..8])).size(12).color(Color::from_rgb(0.5, 0.5, 0.5));
+        let toggle_button = button(text(if self.collapsed { "▶" } else { "▼" }))
+            .on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::ToggleCollapse))
+            .style(iced::widget::button::text::Style::Text);
 
-        let content_view = if !self.is_collapsed {
+        let header = row![
+            toggle_button,
+            id_text,
+            // Add other block actions here (copy, rerun, delete, export)
+            button(text("📋")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Copy)).style(iced::widget::button::text::Style::Text),
+            button(text("🔄")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Rerun)).style(iced::widget::button::text::Style::Text),
+            button(text("🗑️")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Delete)).style(iced::widget::button::text::Style::Text),
+            button(text("📤")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Export)).style(iced::widget::button::text::Style::Text),
+        ]
+        .spacing(5)
+        .align_items(alignment::Horizontal::Center);
+
+        let content_view: Element<crate::Message> = if self.collapsed {
             match &self.content {
-                BlockContent::Command { output_stdout, output_stderr, .. } => {
-                    let output_text = format!("{}{}", output_stdout, output_stderr);
-                    scrollable(
-                        &mut self.scroll_offset,
-                        text(output_text).size(14).width(Length::Fill)
-                    )
-                    .height(Length::Units(100))
-                    .into()
+                BlockContent::Command { input, status, error, .. } => {
+                    row![
+                        text(input).size(16).color(Color::BLACK),
+                        text(format!("Status: {}", status)).size(14).color(if *error { Color::from_rgb(1.0, 0.0, 0.0) } else { Color::from_rgb(0.0, 0.5, 0.0) }),
+                    ].spacing(10).into()
                 }
-                BlockContent::Info { message, .. } => {
-                    text(message).size(14).width(Length::Fill).into()
+                BlockContent::AgentMessage { content, is_user, .. } => {
+                    row![
+                        text(if *is_user { "You:" } else { "Agent:" }).size(14).color(Color::from_rgb(0.2, 0.2, 0.8)),
+                        text(content.lines().next().unwrap_or("...")).size(16),
+                    ].spacing(10).into()
                 }
-                BlockContent::AgentMessage { content } => {
-                    text(content).size(14).width(Length::Fill).into()
+                BlockContent::Info { title, .. } => {
+                    row![
+                        text(format!("Info: {}", title)).size(16).color(Color::from_rgb(0.0, 0.5, 0.8)),
+                    ].spacing(10).into()
                 }
-                BlockContent::UserMessage { content } => {
-                    text(content).size(14).width(Length::Fill).into()
-                }
-                BlockContent::Output { output_stdout, output_stderr, .. } => {
-                    let output_text = format!("{}{}", output_stdout, output_stderr);
-                    scrollable(
-                        &mut self.scroll_offset,
-                        text(output_text).size(14).width(Length::Fill)
-                    )
-                    .height(Length::Units(100))
-                    .into()
-                }
-                BlockContent::Error { message } => {
-                    text(message).size(14).style(|theme| iced::widget::text::Appearance { color: Some(theme.palette().danger) }).width(Length::Fill).into()
+                BlockContent::Error { message, .. } => {
+                    row![
+                        text(format!("Error: {}", message.lines().next().unwrap_or("..."))).size(16).color(Color::from_rgb(1.0, 0.0, 0.0)),
+                    ].spacing(10).into()
                 }
             }
         } else {
-            column![].into()
+            match &self.content {
+                BlockContent::Command { input, output, status, error, start_time, end_time } => {
+                    let output_text = output.iter().map(|(line, is_stdout)| {
+                        text(line).size(14).color(if *is_stdout { Color::BLACK } else { Color::from_rgb(0.8, 0.0, 0.0) })
+                    }).fold(column![], |col, txt| col.push(txt));
+
+                    let duration = end_time.map(|e| e - *start_time).map(|d| format!("Duration: {}ms", d.num_milliseconds())).unwrap_or_default();
+
+                    column![
+                        text(input).size(16).color(Color::from_rgb(0.2, 0.2, 0.8)),
+                        scrollable(output_text).height(Length::Shrink).width(Length::Fill),
+                        row![
+                            text(format!("Status: {}", status)).size(14).color(if *error { Color::from_rgb(1.0, 0.0, 0.0) } else { Color::from_rgb(0.0, 0.5, 0.0) }),
+                            text(duration).size(14).color(Color::from_rgb(0.5, 0.5, 0.5)),
+                        ].spacing(10)
+                    ].spacing(5).into()
+                }
+                BlockContent::AgentMessage { content, is_user, timestamp } => {
+                    column![
+                        text(if *is_user { "You:" } else { "Agent:" }).size(14).color(Color::from_rgb(0.2, 0.2, 0.8)),
+                        text(content).size(16),
+                        text(timestamp.format("%H:%M:%S").to_string()).size(12).color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    ].spacing(5).into()
+                }
+                BlockContent::Info { title, message, timestamp } => {
+                    column![
+                        text(title).size(18).color(Color::from_rgb(0.0, 0.5, 0.8)),
+                        text(message).size(16),
+                        text(timestamp.format("%H:%M:%S").to_string()).size(12).color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    ].spacing(5).into()
+                }
+                BlockContent::Error { message, timestamp } => {
+                    column![
+                        text("Error!").size(18).color(Color::from_rgb(1.0, 0.0, 0.0)),
+                        text(message).size(16),
+                        text(timestamp.format("%H:%M:%S").to_string()).size(12).color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    ].spacing(5).into()
+                }
+            }
         };
 
-        column![
-            header,
-            content_view
-        ]
+        container(
+            column![
+                header,
+                content_view,
+            ]
+            .spacing(5)
+        )
         .padding(10)
-        .spacing(5)
-        .style(|theme| container::Appearance {
-            background: Some(theme.palette().background.into()),
-            border: iced::Border {
-                color: if self.is_error {
-                    theme.palette().danger
-                } else {
-                    theme.palette().text.scale_alpha(0.1)
-                },
-                width: 1.0,
-                radius: 5.0.into(),
-            },
+        .style(iced::widget::container::Appearance {
+            background: Some(iced::Background::Color(Color::WHITE)),
+            border_radius: 5.0,
+            border_width: 1.0,
+            border_color: Color::from_rgb(0.8, 0.8, 0.8),
             ..Default::default()
         })
         .into()
