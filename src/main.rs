@@ -7,6 +7,7 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use futures_util::StreamExt; // For consuming reqwest response stream
+use chrono::{DateTime, Local};
 
 mod block; // Updated import path
 mod shell;
@@ -45,7 +46,7 @@ mod api; // New API module
 use block::{Block, BlockContent}; // Updated import
 use shell::ShellManager;
 use input::{EnhancedTextInput, Message as InputMessage, HistoryDirection, Direction};
-use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage};
+use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage, AgentToolCall};
 use config::AppConfig;
 use crate::{
     ui::{
@@ -69,7 +70,7 @@ pub struct NeoTerm {
     // Agent mode
     agent_mode: Arc<RwLock<AgentMode>>,
     agent_enabled: bool,
-    agent_streaming: bool,
+    agent_streaming_rx: Option<mpsc::Receiver<AgentMessage>>, // Receiver for agent messages
     
     // Configuration
     config: AppConfig,
@@ -86,13 +87,13 @@ pub enum Message {
     ExecuteCommand,
     PtyOutput(PtyMessage),
     KeyboardEvent(keyboard::Event),
-    BlockAction(Uuid, BlockMessage),
+    BlockAction(String, BlockMessage), // Block ID is String now
     Tick,
     
     // Agent mode messages
     ToggleAgentMode,
-    AgentMessage(AgentMessage),
-    AgentStreamingChunk(String),
+    AgentStream(AgentMessage), // Streamed messages from agent
+    AgentStreamEnded,
     AgentError(String),
     
     // Settings messages
@@ -111,6 +112,7 @@ pub enum BlockMessage {
     Delete,
     Export,
     ToggleCollapse,
+    SendToAI, // New: Send this block's content to AI as context
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +149,7 @@ impl Application for NeoTerm {
         let agent_config = {
             let mut cfg = AgentConfig::default();
             if let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() {
-                cfg.ai_config.api_key = Some(api_key);
+                cfg.ai_config = agent_mode_eval::ai_client::AIClientConfig::OpenAI { api_key: Some(api_key) };
             }
             cfg
         };
@@ -168,7 +170,7 @@ impl Application for NeoTerm {
                 shell_manager,
                 agent_mode,
                 agent_enabled: false,
-                agent_streaming: false,
+                agent_streaming_rx: None,
                 config,
                 settings_open: false,
                 pty_tx,
@@ -195,7 +197,7 @@ impl Application for NeoTerm {
                         self.input_bar.update(InputMessage::Submit);
                         if !command.trim().is_empty() {
                             if command.starts_with("#") || command.starts_with("/ai") {
-                                self.handle_ai_command(command)
+                                self.handle_ai_command(command, None)
                             } else {
                                 self.execute_command(command)
                             }
@@ -254,35 +256,77 @@ impl Application for NeoTerm {
                     },
                     |msg| {
                         if let Some(content) = msg {
-                            Message::AgentMessage(AgentMessage::SystemMessage(content))
+                            Message::AgentStream(AgentMessage::SystemMessage(content))
                         } else {
                             Message::AgentError("Failed to start agent conversation.".to_string())
                         }
                     }
                 )
             }
-            Message::AgentMessage(agent_msg) => {
+            Message::AgentStream(agent_msg) => {
                 match agent_msg {
-                    AgentMessage::SystemMessage(content) => {
-                        let block = Block::new_agent_message(content); // Changed from CommandBlock to Block
+                    AgentMessage::UserMessage(content) => {
+                        let block = Block::new_user_message(content);
                         self.blocks.push(block);
                     }
-                    _ => { /* Other agent messages handled by API */ }
+                    AgentMessage::AgentResponse(content) => {
+                        if let Some(last_block) = self.blocks.last_mut() {
+                            if let BlockContent::AgentMessage { ref mut content: block_content, .. } = last_block.content {
+                                block_content.push_str(&content);
+                            } else {
+                                // If the last block isn't an agent message, create a new one
+                                let mut new_block = Block::new_agent_message(content);
+                                new_block.set_status("Streaming...".to_string());
+                                self.blocks.push(new_block);
+                            }
+                        } else {
+                            // No blocks yet, create a new agent message block
+                            let mut new_block = Block::new_agent_message(content);
+                            new_block.set_status("Streaming...".to_string());
+                            self.blocks.push(new_block);
+                        }
+                    }
+                    AgentMessage::ToolCall(tool_call) => {
+                        let block = Block::new_info(
+                            format!("AI Tool Call: {}", tool_call.name),
+                            format!("Arguments: {}", tool_call.arguments.to_string())
+                        );
+                        self.blocks.push(block);
+                    }
+                    AgentMessage::ToolResult(result) => {
+                        let block = Block::new_info(
+                            "AI Tool Result".to_string(),
+                            result
+                        );
+                        self.blocks.push(block);
+                    }
+                    AgentMessage::SystemMessage(content) => {
+                        let block = Block::new_info("System Message".to_string(), content);
+                        self.blocks.push(block);
+                    }
+                    AgentMessage::Error(error) => {
+                        let block = Block::new_error(format!("Agent error: {}", error));
+                        self.blocks.push(block);
+                    }
+                    AgentMessage::Done => {
+                        if let Some(last_block) = self.blocks.last_mut() {
+                            if let BlockContent::AgentMessage { .. } = last_block.content {
+                                last_block.set_status("Completed".to_string());
+                            }
+                        }
+                        self.agent_streaming_rx = None; // Mark stream as ended
+                    }
                 }
                 Command::none()
             }
-            Message::AgentStreamingChunk(chunk) => {
-                if let Some(last_block) = self.blocks.last_mut() {
-                    if let BlockContent::AgentMessage { ref mut content, .. } = last_block.content {
-                        content.push_str(&chunk);
-                    }
-                }
+            Message::AgentStreamEnded => {
+                self.agent_streaming_rx = None;
                 Command::none()
             }
             Message::AgentError(error) => {
                 let block = Block::new_error(format!("Agent error: {}", error)); // Changed from CommandBlock to Block
                 self.blocks.push(block);
-                self.agent_streaming = false;
+                self.agent_streaming_rx = None;
                 Command::none()
             }
             Message::ToggleSettings => {
@@ -367,10 +411,26 @@ impl Application for NeoTerm {
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
+        let agent_stream_sub = if let Some(rx) = self.agent_streaming_rx.clone() {
+            iced::Subscription::unfold(
+                "agent_stream",
+                rx,
+                |mut receiver| async move {
+                    match receiver.recv().await {
+                        Some(msg) => (Message::AgentStream(msg), receiver),
+                        None => (Message::AgentStreamEnded, receiver),
+                    }
+                },
+            )
+        } else {
+            iced::Subscription::none()
+        };
+
         iced::Subscription::batch(vec![
             iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
             self.pty_manager_subscription(),
             keyboard::Event::all().map(Message::KeyboardEvent),
+            agent_stream_sub,
         ])
     }
 }
@@ -393,68 +453,41 @@ impl NeoTerm {
             .into()
     }
 
-    fn handle_ai_command(&mut self, command: String) -> Command<Message> {
+    fn handle_ai_command(&mut self, command: String, context_block_id: Option<String>) -> Command<Message> {
         let prompt = command.trim_start_matches('#').trim_start_matches("/ai").trim().to_string();
         
-        let user_block = Block::new_user_message(command.clone()); // Changed from CommandBlock to Block
+        let user_block = Block::new_user_message(command.clone());
         self.blocks.push(user_block);
         
-        let agent_block = Block::new_agent_message(String::new()); // Changed from CommandBlock to Block
-        let agent_block_id = agent_block.id.clone();
-        self.blocks.push(agent_block);
-        self.agent_streaming = true;
+        // Prepare context blocks
+        let mut context_blocks = Vec::new();
+        if let Some(id) = context_block_id {
+            if let Some(block) = self.blocks.iter().find(|b| b.id == id) {
+                context_blocks.push(block.clone());
+            }
+        }
+
+        let agent_mode_arc_clone = self.agent_mode.clone();
+        let (tx, rx) = mpsc::channel(100); // Channel for agent messages
+        self.agent_streaming_rx = Some(rx); // Set the receiver for the subscription
 
         Command::perform(
             async move {
-                let client = reqwest::Client::new();
-                let request_body = api::ai::AiRequest {
-                    prompt,
-                    context_block_id: None,
-                };
-
-                let response = client
-                    .post("http://127.0.0.1:3030/api/ai")
-                    .json(&request_body)
-                    .send()
-                    .await;
-
-                match response {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            let mut stream = resp.bytes_stream();
-                            let mut full_response = String::new();
-                            while let Some(chunk_result) = stream.next().await {
-                                match chunk_result {
-                                    Ok(bytes) => {
-                                        let text_chunk = String::from_utf8_lossy(&bytes);
-                                        for line in text_chunk.lines() {
-                                            if line.starts_with("data: ") {
-                                                let data = &line[6..];
-                                                if let Ok(ai_chunk) = serde_json::from_str::<api::ai::AiResponseChunk>(data) {
-                                                    if ai_chunk.is_done {
-                                                        return Ok(Message::AgentStreamingChunk(full_response));
-                                                    }
-                                                    full_response.push_str(&ai_chunk.content);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => return Err(format!("Stream error: {}", e)),
-                                }
+                let mut agent_mode = agent_mode_arc_clone.write().await;
+                match agent_mode.send_message(prompt, context_blocks).await {
+                    Ok(mut stream_rx) => {
+                        while let Some(msg) = stream_rx.recv().await {
+                            if tx.send(msg).await.is_err() {
+                                break; // Receiver dropped
                             }
-                            Ok(Message::AgentStreamingChunk(full_response))
-                        } else {
-                            let error_text = resp.text().await.unwrap_or_else(|_| "Unknown API error".to_string());
-                            Err(format!("API error: Status {} - {}", resp.status(), error_text))
                         }
                     }
-                    Err(e) => Err(format!("Failed to connect to AI API: {}", e)),
+                    Err(e) => {
+                        let _ = tx.send(AgentMessage::Error(format!("Failed to send message to agent: {}", e))).await;
+                    }
                 }
             },
-            |result| match result {
-                Ok(msg) => msg,
-                Err(error) => Message::AgentError(error),
-            }
+            |_| Message::Tick // Just a dummy message to trigger update
         )
     }
 
@@ -474,14 +507,35 @@ impl NeoTerm {
                     Command::none()
                 }
                 BlockMessage::Copy => {
+                    // TODO: Implement copy to clipboard
                     Command::none()
                 }
                 BlockMessage::Export => {
+                    // TODO: Implement export functionality
                     Command::none()
                 }
                 BlockMessage::ToggleCollapse => {
                     block.toggle_collapse();
                     Command::none()
+                }
+                BlockMessage::SendToAI => {
+                    // Send the content of this block to the AI
+                    let block_to_send = block.clone();
+                    let prompt = format!("Please analyze the following block:\n{}", match &block_to_send.content {
+                        BlockContent::Command { input, output, status, error, .. } => {
+                            format!("Command: `{}`\nOutput:\n\`\`\`\n{}\n\`\`\`\nStatus: {}\nError: {}", input, output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n"), status, error)
+                        },
+                        BlockContent::AgentMessage { content, is_user, .. } => {
+                            format!("{}: {}", if *is_user { "User" } else { "Agent" }, content)
+                        },
+                        BlockContent::Info { title, message, .. } => {
+                            format!("Info ({}): {}", title, message)
+                        },
+                        BlockContent::Error { message, .. } => {
+                            format!("Error: {}", message)
+                        },
+                    });
+                    self.handle_ai_command(prompt, Some(block_id.clone()))
                 }
             }
         } else {

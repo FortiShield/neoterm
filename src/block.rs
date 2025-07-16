@@ -37,6 +37,7 @@ pub struct Block {
     pub id: String,
     pub content: BlockContent,
     pub collapsed: bool,
+    pub status: Option<String>, // For streaming updates
 }
 
 impl Block {
@@ -52,6 +53,7 @@ impl Block {
                 end_time: None,
             },
             collapsed: false,
+            status: Some("Running...".to_string()),
         }
     }
 
@@ -64,6 +66,7 @@ impl Block {
                 timestamp: Local::now(),
             },
             collapsed: false,
+            status: None, // Status will be set during streaming
         }
     }
 
@@ -76,6 +79,7 @@ impl Block {
                 timestamp: Local::now(),
             },
             collapsed: false,
+            status: None,
         }
     }
 
@@ -88,6 +92,7 @@ impl Block {
                 timestamp: Local::now(),
             },
             collapsed: false,
+            status: None,
         }
     }
 
@@ -99,6 +104,7 @@ impl Block {
                 timestamp: Local::now(),
             },
             collapsed: false,
+            status: Some("Error".to_string()),
         }
     }
 
@@ -117,10 +123,16 @@ impl Block {
     }
 
     pub fn set_status(&mut self, status: String) {
-        if let BlockContent::Command { status: s, end_time, .. } = &mut self.content {
-            *s = status;
-            *end_time = Some(Local::now());
+        match &mut self.content {
+            BlockContent::Command { status: s, end_time, .. } => {
+                *s = status.clone();
+                *end_time = Some(Local::now());
+            },
+            BlockContent::AgentMessage { .. } | BlockContent::Info { .. } | BlockContent::Error { .. } => {
+                // For other block types, update the general status field
+            }
         }
+        self.status = Some(status);
     }
 
     pub fn set_error(&mut self, error: bool) {
@@ -136,17 +148,18 @@ impl Block {
     pub fn view(&self) -> Element<crate::Message> {
         let id_text = text(format!("#{}", &self.id[0..8])).size(12).color(Color::from_rgb(0.5, 0.5, 0.5));
         let toggle_button = button(text(if self.collapsed { "▶" } else { "▼" }))
-            .on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::ToggleCollapse))
+            .on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::ToggleCollapse))
             .style(iced::widget::button::text::Style::Text);
 
         let header = row![
             toggle_button,
             id_text,
             // Add other block actions here (copy, rerun, delete, export)
-            button(text("📋")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Copy)).style(iced::widget::button::text::Style::Text),
-            button(text("🔄")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Rerun)).style(iced::widget::button::text::Style::Text),
-            button(text("🗑️")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Delete)).style(iced::widget::button::text::Style::Text),
-            button(text("📤")).on_press(crate::Message::BlockAction(self.id.clone(), crate::block::BlockMessage::Export)).style(iced::widget::button::text::Style::Text),
+            button(text("📋")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Copy)).style(iced::widget::button::text::Style::Text),
+            button(text("🔄")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Rerun)).style(iced::widget::button::text::Style::Text),
+            button(text("🗑️")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Delete)).style(iced::widget::button::text::Style::Text),
+            button(text("📤")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Export)).style(iced::widget::button::text::Style::Text),
+            button(text("🤖")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SendToAI)).style(iced::widget::button::text::Style::Text), // New: Send to AI
         ]
         .spacing(5)
         .align_items(alignment::Horizontal::Center);

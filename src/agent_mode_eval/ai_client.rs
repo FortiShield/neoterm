@@ -12,6 +12,7 @@ use openai_api::{
 use std::error::Error;
 use std::fmt;
 use crate::agent_mode_eval::conversation::{Message, MessageRole};
+use crate::agent_mode_eval::tools::{ToolCall as AgentToolCall, ToolResult as AgentToolResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AiProvider {
@@ -51,10 +52,17 @@ impl fmt::Display for AIClientError {
 
 impl Error for AIClientError {}
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AIStreamChunk {
+    Text(String),
+    ToolCall(Vec<AgentToolCall>),
+    Done,
+}
+
 #[async_trait]
 pub trait AIClient: Send + Sync {
     fn clone_box(&self) -> Box<dyn AIClient + Send + Sync>;
-    async fn stream_text(&self, messages: Vec<Message>) -> Result<Box<dyn Stream<Item = Result<String, AIClientError>> + Send + Unpin>, AIClientError>;
+    async fn stream_response(&self, messages: Vec<Message>, tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,8 +98,8 @@ pub struct Message {
     pub role: MessageRole,
     pub content: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub tool_calls: Option<Vec<ToolCall>>,
-    pub tool_results: Option<Vec<ToolResult>>,
+    pub tool_calls: Option<Vec<AgentToolCall>>,
+    pub tool_results: Option<Vec<AgentToolResult>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,20 +108,6 @@ pub enum MessageRole {
     User,
     Assistant,
     Tool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    pub content: String,
-    pub is_error: bool,
 }
 
 pub struct AiClient {
@@ -193,29 +187,29 @@ impl AiClient {
             .unwrap_or(false)
     }
 
-    pub async fn send_message(
+    pub async fn stream_response(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
-    ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
+    ) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
         match self.config.provider {
-            AiProvider::OpenAI => self.send_openai_message(messages, tools).await,
-            AiProvider::Claude => self.send_claude_message(messages, tools).await,
-            AiProvider::Gemini => self.send_gemini_message(messages, tools).await,
-            AiProvider::Ollama => self.send_ollama_message(messages, tools).await,
-            AiProvider::Groq => self.send_groq_message(messages, tools).await,
+            AiProvider::OpenAI => self.stream_openai_response(messages, tools).await,
+            AiProvider::Claude => self.stream_claude_response(messages, tools).await,
+            AiProvider::Gemini => self.stream_gemini_response(messages, tools).await,
+            AiProvider::Ollama => self.stream_ollama_response(messages, tools).await,
+            AiProvider::Groq => self.stream_groq_response(messages, tools).await,
         }
     }
 
-    async fn send_openai_message(
+    async fn stream_openai_response(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
-    ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::channel(100);
+    ) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
+        let (tx, rx) = mpsc::unbounded_channel();
         
         let api_key = self.config.api_key.as_ref()
-            .ok_or("OpenAI API key required")?;
+            .ok_or(AIClientError::ConfigurationError("OpenAI API key required".to_string()))?;
 
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("https://api.openai.com/v1");
@@ -231,10 +225,10 @@ impl AiClient {
             request_body["max_tokens"] = serde_json::Value::Number(max_tokens.into());
         }
 
-        if let Some(tools) = tools {
-            if self.config.tools_enabled && !tools.is_empty() {
+        if let Some(tools_def) = tools {
+            if self.config.tools_enabled && !tools_def.is_empty() {
                 request_body["tools"] = serde_json::json!(
-                    tools.iter().map(|tool| tool.to_openai_format()).collect::<Vec<_>>()
+                    tools_def.iter().map(|tool| tool.to_openai_format()).collect::<Vec<_>>()
                 );
                 request_body["tool_choice"] = serde_json::Value::String("auto".to_string());
             }
@@ -255,47 +249,94 @@ impl AiClient {
 
             match response {
                 Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
-                                if data == "[DONE]" {
-                                    break;
-                                }
-                                
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(choices) = json["choices"].as_array() {
-                                        if let Some(choice) = choices.first() {
-                                            if let Some(delta) = choice["delta"].as_object() {
-                                                if let Some(content) = delta["content"].as_str() {
-                                                    let _ = tx.send(content.to_string()).await;
+                    if resp.status().is_success() {
+                        let mut stream = resp.bytes_stream();
+                        let mut current_tool_calls: HashMap<String, AgentToolCall> = HashMap::new();
+
+                        while let Some(chunk_result) = stream.next().await {
+                            match chunk_result {
+                                Ok(bytes) => {
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    for line in text.lines() {
+                                        if line.starts_with("data: ") {
+                                            let data = &line[6..];
+                                            if data == "[DONE]" {
+                                                let _ = tx.send(Ok(AIStreamChunk::Done));
+                                                return;
+                                            }
+                                            
+                                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                if let Some(choices) = json["choices"].as_array() {
+                                                    if let Some(choice) = choices.first() {
+                                                        if let Some(delta) = choice["delta"].as_object() {
+                                                            if let Some(content) = delta["content"].as_str() {
+                                                                let _ = tx.send(Ok(AIStreamChunk::Text(content.to_string())));
+                                                            }
+                                                            if let Some(tool_calls_array) = delta["tool_calls"].as_array() {
+                                                                for tool_call_delta in tool_calls_array {
+                                                                    if let Some(index) = tool_call_delta["index"].as_u64() {
+                                                                        let id = tool_call_delta["id"].as_str().unwrap_or_default().to_string();
+                                                                        let name = tool_call_delta["function"]["name"].as_str().unwrap_or_default().to_string();
+                                                                        let arguments_delta = tool_call_delta["function"]["arguments"].as_str().unwrap_or_default().to_string();
+
+                                                                        let entry = current_tool_calls.entry(id.clone()).or_insert_with(|| AgentToolCall {
+                                                                            id: id.clone(),
+                                                                            name: name.clone(),
+                                                                            arguments: serde_json::Value::String("".to_string()),
+                                                                        });
+                                                                        
+                                                                        if let serde_json::Value::String(ref mut args_str) = entry.arguments {
+                                                                            args_str.push_str(&arguments_delta);
+                                                                        }
+                                                                    }
+                                                                }
+                                                                // Send accumulated tool calls if they are complete or if it's the last chunk
+                                                                // For simplicity, we'll send them when the stream ends or when a new text chunk appears.
+                                                                // A more robust solution would check for 'finish_reason' or 'tool_calls' completion.
+                                                                if !current_tool_calls.is_empty() {
+                                                                    let completed_tool_calls: Vec<AgentToolCall> = current_tool_calls.values().cloned().collect();
+                                                                    if !completed_tool_calls.is_empty() {
+                                                                        let _ = tx.send(Ok(AIStreamChunk::ToolCall(completed_tool_calls)));
+                                                                        current_tool_calls.clear(); // Clear after sending
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                                Err(e) => {
+                                    let _ = tx.send(Err(AIClientError::StreamError(format!("Error reading stream: {}", e))));
+                                    return;
+                                }
                             }
                         }
+                    } else {
+                        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                        let _ = tx.send(Err(AIClientError::APIError(format!("OpenAI API error: Status {} - {}", resp.status(), error_text))));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error: {}", e)).await;
+                    let _ = tx.send(Err(AIClientError::APIError(format!("Error connecting to OpenAI: {}", e))));
                 }
             }
         });
 
-        Ok(rx)
+        Ok(Box::new(mpsc::unbounded_channel_to_stream(rx)))
     }
 
-    async fn send_claude_message(
+    async fn stream_claude_response(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
-    ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::channel(100);
+    ) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
+        let (tx, rx) = mpsc::unbounded_channel();
         
         let api_key = self.config.api_key.as_ref()
-            .ok_or("Claude API key required")?;
+            .ok_or(AIClientError::ConfigurationError("Claude API key required".to_string()))?;
 
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("https://api.anthropic.com/v1");
@@ -309,16 +350,18 @@ impl AiClient {
 
         if let Some(max_tokens) = self.config.max_tokens {
             request_body["max_tokens"] = serde_json::Value::Number(max_tokens.into());
+        } else {
+            request_body["max_tokens"] = serde_json::Value::Number(4096.into()); // Claude requires max_tokens
         }
 
         if let Some(system_prompt) = &self.config.system_prompt {
             request_body["system"] = serde_json::Value::String(system_prompt.clone());
         }
 
-        if let Some(tools) = tools {
-            if self.config.tools_enabled && !tools.is_empty() {
+        if let Some(tools_def) = tools {
+            if self.config.tools_enabled && !tools_def.is_empty() {
                 request_body["tools"] = serde_json::json!(
-                    tools.iter().map(|tool| tool.to_claude_format()).collect::<Vec<_>>()
+                    tools_def.iter().map(|tool| tool.to_claude_format()).collect::<Vec<_>>()
                 );
             }
         }
@@ -338,39 +381,86 @@ impl AiClient {
 
             match response {
                 Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(delta) = json["delta"].as_object() {
-                                        if let Some(text) = delta["text"].as_str() {
-                                            let _ = tx.send(text.to_string()).await;
+                    if resp.status().is_success() {
+                        let mut stream = resp.bytes_stream();
+                        while let Some(chunk_result) = stream.next().await {
+                            match chunk_result {
+                                Ok(bytes) => {
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    for line in text.lines() {
+                                        if line.starts_with("data: ") {
+                                            let data = &line[6..];
+                                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                if let Some(event_type) = json["type"].as_str() {
+                                                    match event_type {
+                                                        "content_block_delta" => {
+                                                            if let Some(delta) = json["delta"].as_object() {
+                                                                if let Some(text) = delta["text"].as_str() {
+                                                                    let _ = tx.send(Ok(AIStreamChunk::Text(text.to_string())));
+                                                                }
+                                                            }
+                                                        },
+                                                        "content_block_start" => {
+                                                            if let Some(content_block) = json["content_block"].as_object() {
+                                                                if let Some(block_type) = content_block["type"].as_str() {
+                                                                    if block_type == "tool_use" {
+                                                                        let id = content_block["id"].as_str().unwrap_or_default().to_string();
+                                                                        let name = content_block["name"].as_str().unwrap_or_default().to_string();
+                                                                        // Arguments will come in subsequent content_block_delta events
+                                                                        let _ = tx.send(Ok(AIStreamChunk::ToolCall(vec![AgentToolCall {
+                                                                            id,
+                                                                            name,
+                                                                            arguments: serde_json::Value::String("".to_string()), // Will be filled by delta
+                                                                        }])));
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        "content_block_stop" => {
+                                                            // Tool arguments are complete here, but we sent the tool_call on start.
+                                                            // A more complex state machine would be needed to accumulate arguments.
+                                                            // For now, we assume arguments are sent in one go or handled by the AI.
+                                                        },
+                                                        "message_stop" => {
+                                                            let _ = tx.send(Ok(AIStreamChunk::Done));
+                                                            return;
+                                                        },
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
+                                Err(e) => {
+                                    let _ = tx.send(Err(AIClientError::StreamError(format!("Error reading stream: {}", e))));
+                                    return;
+                                }
                             }
                         }
+                    } else {
+                        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                        let _ = tx.send(Err(AIClientError::APIError(format!("Claude API error: Status {} - {}", resp.status(), error_text))));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error: {}", e)).await;
+                    let _ = tx.send(Err(AIClientError::APIError(format!("Error connecting to Claude: {}", e))));
                 }
             }
         });
 
-        Ok(rx)
+        Ok(Box::new(mpsc::unbounded_channel_to_stream(rx)))
     }
 
-    async fn send_gemini_message(
+    async fn stream_gemini_response(
         &self,
         messages: Vec<Message>,
-        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
-    ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::channel(100);
+        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>, // Tools not supported in this iteration
+    ) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
+        let (tx, rx) = mpsc::unbounded_channel();
         
         let api_key = self.config.api_key.as_ref()
-            .ok_or("Gemini API key required")?;
+            .ok_or(AIClientError::ConfigurationError("Gemini API key required".to_string()))?;
 
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("https://generativelanguage.googleapis.com/v1beta");
@@ -396,39 +486,56 @@ impl AiClient {
 
             match response {
                 Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        for line in text.lines() {
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                                if let Some(candidates) = json["candidates"].as_array() {
-                                    if let Some(candidate) = candidates.first() {
-                                        if let Some(content) = candidate["content"]["parts"].as_array() {
-                                            if let Some(part) = content.first() {
-                                                if let Some(text) = part["text"].as_str() {
-                                                    let _ = tx.send(text.to_string()).await;
+                    if resp.status().is_success() {
+                        let mut stream = resp.bytes_stream();
+                        while let Some(chunk_result) = stream.next().await {
+                            match chunk_result {
+                                Ok(bytes) => {
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    for line in text.lines() {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                                            if let Some(candidates) = json["candidates"].as_array() {
+                                                if let Some(candidate) = candidates.first() {
+                                                    if let Some(content_parts) = candidate["content"]["parts"].as_array() {
+                                                        for part in content_parts {
+                                                            if let Some(text) = part["text"].as_str() {
+                                                                let _ = tx.send(Ok(AIStreamChunk::Text(text.to_string())));
+                                                            }
+                                                            // No tool call parsing for Gemini in this iteration
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                                Err(e) => {
+                                    let _ = tx.send(Err(AIClientError::StreamError(format!("Error reading stream: {}", e))));
+                                    return;
+                                }
                             }
                         }
+                        let _ = tx.send(Ok(AIStreamChunk::Done));
+                    } else {
+                        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                        let _ = tx.send(Err(AIClientError::APIError(format!("Gemini API error: Status {} - {}", resp.status(), error_text))));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error: {}", e)).await;
+                    let _ = tx.send(Err(AIClientError::APIError(format!("Error connecting to Gemini: {}", e))));
                 }
             }
         });
 
-        Ok(rx)
+        Ok(Box::new(mpsc::unbounded_channel_to_stream(rx)))
     }
 
-    async fn send_ollama_message(
+    async fn stream_ollama_response(
         &self,
         messages: Vec<Message>,
-        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
-    ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::channel(100);
+        _tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>, // Tools not supported in this iteration
+    ) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
+        let (tx, rx) = mpsc::unbounded_channel();
         
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("http://localhost:11434");
@@ -465,48 +572,52 @@ impl AiClient {
                                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
                                             if let Some(message) = json["message"].as_object() {
                                                 if let Some(content) = message["content"].as_str() {
-                                                    let _ = tx.send(content.to_string()).await;
+                                                    let _ = tx.send(Ok(AIStreamChunk::Text(content.to_string())));
                                                 }
+                                            }
+                                            if json["done"].as_bool().unwrap_or(false) {
+                                                let _ = tx.send(Ok(AIStreamChunk::Done));
+                                                return;
                                             }
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(format!("Error reading stream: {}", e)).await;
+                                    let _ = tx.send(Err(AIClientError::StreamError(format!("Error reading stream: {}", e))));
                                     break;
                                 }
                             }
                         }
                     } else {
                         let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                        let _ = tx.send(format!("Ollama API error: Status {} - {}", resp.status(), error_text)).await;
+                        let _ = tx.send(Err(AIClientError::APIError(format!("Ollama API error: Status {} - {}", resp.status(), error_text))));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error connecting to Ollama: {}", e)).await;
+                    let _ = tx.send(Err(AIClientError::APIError(format!("Error connecting to Ollama: {}", e))));
                 }
             }
         });
 
-        Ok(rx)
+        Ok(Box::new(mpsc::unbounded_channel_to_stream(rx)))
     }
 
-    async fn send_groq_message(
+    async fn stream_groq_response(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>,
-    ) -> Result<mpsc::Receiver<String>, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::channel(100);
+    ) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
+        let (tx, rx) = mpsc::unbounded_channel();
         
         let api_key = self.config.api_key.as_ref()
-            .ok_or("Groq API key required")?;
+            .ok_or(AIClientError::ConfigurationError("Groq API key required".to_string()))?;
 
         let base_url = self.config.base_url.as_deref()
             .unwrap_or("https://api.groq.com/openai/v1");
 
         let mut request_body = serde_json::json!({
             "model": self.config.model,
-            "messages": self.format_messages_for_openai(&messages),
+            "messages": self.format_messages_for_openai(&messages), // Groq uses OpenAI message format
             "temperature": self.config.temperature,
             "stream": true
         });
@@ -515,11 +626,12 @@ impl AiClient {
             request_body["max_tokens"] = serde_json::Value::Number(max_tokens.into());
         }
 
-        if let Some(tools) = tools {
-            if self.config.tools_enabled && !tools.is_empty() {
+        if let Some(tools_def) = tools {
+            if self.config.tools_enabled && !tools_def.is_empty() {
                 request_body["tools"] = serde_json::json!(
-                    tools.iter().map(|tool| tool.to_openai_format()).collect::<Vec<_>>()
+                    tools_def.iter().map(|tool| tool.to_openai_format()).collect::<Vec<_>>()
                 );
+                request_body["tool_choice"] = serde_json::Value::String("auto".to_string());
             }
         }
 
@@ -538,41 +650,85 @@ impl AiClient {
 
             match response {
                 Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
-                                if data == "[DONE]" {
-                                    break;
-                                }
-                                
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(choices) = json["choices"].as_array() {
-                                        if let Some(choice) = choices.first() {
-                                            if let Some(delta) = choice["delta"].as_object() {
-                                                if let Some(content) = delta["content"].as_str() {
-                                                    let _ = tx.send(content.to_string()).await;
+                    if resp.status().is_success() {
+                        let mut stream = resp.bytes_stream();
+                        let mut current_tool_calls: HashMap<String, AgentToolCall> = HashMap::new();
+
+                        while let Some(chunk_result) = stream.next().await {
+                            match chunk_result {
+                                Ok(bytes) => {
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    for line in text.lines() {
+                                        if line.starts_with("data: ") {
+                                            let data = &line[6..];
+                                            if data == "[DONE]" {
+                                                let _ = tx.send(Ok(AIStreamChunk::Done));
+                                                return;
+                                            }
+                                            
+                                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                if let Some(choices) = json["choices"].as_array() {
+                                                    if let Some(choice) = choices.first() {
+                                                        if let Some(delta) = choice["delta"].as_object() {
+                                                            if let Some(content) = delta["content"].as_str() {
+                                                                let _ = tx.send(Ok(AIStreamChunk::Text(content.to_string())));
+                                                            }
+                                                            if let Some(tool_calls_array) = delta["tool_calls"].as_array() {
+                                                                for tool_call_delta in tool_calls_array {
+                                                                    if let Some(index) = tool_call_delta["index"].as_u64() {
+                                                                        let id = tool_call_delta["id"].as_str().unwrap_or_default().to_string();
+                                                                        let name = tool_call_delta["function"]["name"].as_str().unwrap_or_default().to_string();
+                                                                        let arguments_delta = tool_call_delta["function"]["arguments"].as_str().unwrap_or_default().to_string();
+
+                                                                        let entry = current_tool_calls.entry(id.clone()).or_insert_with(|| AgentToolCall {
+                                                                            id: id.clone(),
+                                                                            name: name.clone(),
+                                                                            arguments: serde_json::Value::String("".to_string()),
+                                                                        });
+                                                                        
+                                                                        if let serde_json::Value::String(ref mut args_str) = entry.arguments {
+                                                                            args_str.push_str(&arguments_delta);
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if !current_tool_calls.is_empty() {
+                                                                    let completed_tool_calls: Vec<AgentToolCall> = current_tool_calls.values().cloned().collect();
+                                                                    if !completed_tool_calls.is_empty() {
+                                                                        let _ = tx.send(Ok(AIStreamChunk::ToolCall(completed_tool_calls)));
+                                                                        current_tool_calls.clear();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
+                                Err(e) => {
+                                    let _ = tx.send(Err(AIClientError::StreamError(format!("Error reading stream: {}", e))));
+                                    return;
+                                }
                             }
                         }
+                    } else {
+                        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                        let _ = tx.send(Err(AIClientError::APIError(format!("Groq API error: Status {} - {}", resp.status(), error_text))));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error: {}", e)).await;
+                    let _ = tx.send(Err(AIClientError::APIError(format!("Error connecting to Groq: {}", e))));
                 }
             }
         });
 
-        Ok(rx)
+        Ok(Box::new(mpsc::unbounded_channel_to_stream(rx)))
     }
 
     fn format_messages_for_openai(&self, messages: &[Message]) -> Vec<serde_json::Value> {
         messages.iter().map(|msg| {
-            serde_json::json!({
+            let mut json_msg = serde_json::json!({
                 "role": match msg.role {
                     MessageRole::System => "system",
                     MessageRole::User => "user",
@@ -580,23 +736,70 @@ impl AiClient {
                     MessageRole::Tool => "tool",
                 },
                 "content": msg.content
-            })
+            });
+
+            if let Some(tool_calls) = &msg.tool_calls {
+                json_msg["tool_calls"] = serde_json::json!(tool_calls.iter().map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments.to_string(), // Arguments are stringified JSON
+                        }
+                    })
+                }).collect::<Vec<_>>());
+                json_msg["content"] = serde_json::Value::Null; // Content is null for tool_calls
+            }
+
+            if let Some(tool_results) = &msg.tool_results {
+                // OpenAI tool results are sent as 'tool' role messages
+                // The content is the tool's output, and tool_call_id links to the original tool_call
+                json_msg["tool_call_id"] = serde_json::Value::String(tool_results[0].tool_call_id.clone());
+                json_msg["content"] = serde_json::Value::String(tool_results[0].content.clone());
+                // Assuming one tool result per message for simplicity, or combine content
+            }
+
+            json_msg
         }).collect()
     }
 
     fn format_messages_for_claude(&self, messages: &[Message]) -> Vec<serde_json::Value> {
         messages.iter().filter_map(|msg| {
             match msg.role {
-                MessageRole::System => None,
-                _ => Some(serde_json::json!({
-                    "role": match msg.role {
-                        MessageRole::User => "user",
-                        MessageRole::Assistant => "assistant",
-                        MessageRole::Tool => "user",
-                        MessageRole::System => unreachable!(),
-                    },
-                    "content": msg.content
-                }))
+                MessageRole::System => None, // System prompt is handled separately for Claude
+                MessageRole::User => Some(serde_json::json!({
+                    "role": "user",
+                    "content": if let Some(tool_results) = &msg.tool_results {
+                        // Claude tool results are sent as 'user' role with 'tool_result' type
+                        serde_json::json!([
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_results[0].tool_call_id,
+                                "content": tool_results[0].content,
+                            }
+                        ])
+                    } else {
+                        serde_json::json!([{"type": "text", "text": msg.content}])
+                    }
+                })),
+                MessageRole::Assistant => Some(serde_json::json!({
+                    "role": "assistant",
+                    "content": if let Some(tool_calls) = &msg.tool_calls {
+                        // Claude tool calls are sent as 'assistant' role with 'tool_use' type
+                        serde_json::json!(tool_calls.iter().map(|tc| {
+                            serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": tc.arguments, // Arguments are direct JSON
+                            })
+                        }).collect::<Vec<_>>())
+                    } else {
+                        serde_json::json!([{"type": "text", "text": msg.content}])
+                    }
+                })),
+                MessageRole::Tool => None, // Tool role is converted to user with tool_result content for Claude
             }
         }).collect()
     }
@@ -607,9 +810,31 @@ impl AiClient {
                 "role": match msg.role {
                     MessageRole::User | MessageRole::System => "user",
                     MessageRole::Assistant => "model",
-                    MessageRole::Tool => "user",
+                    MessageRole::Tool => "function", // Gemini uses 'function' role for tool results
                 },
-                "parts": [{"text": msg.content}]
+                "parts": if let Some(tool_results) = &msg.tool_results {
+                    // Gemini tool results are sent as 'function' role with 'functionResponse' type
+                    serde_json::json!([
+                        {
+                            "functionResponse": {
+                                "name": tool_results[0].tool_call_id, // Assuming tool_call_id can be used as name
+                                "response": serde_json::json!({"output": tool_results[0].content}),
+                            }
+                        }
+                    ])
+                } else if let Some(tool_calls) = &msg.tool_calls {
+                    // Gemini tool calls are sent as 'model' role with 'functionCall' type
+                    serde_json::json!(tool_calls.iter().map(|tc| {
+                        serde_json::json!({
+                            "functionCall": {
+                                "name": tc.name,
+                                "args": tc.arguments, // Arguments are direct JSON
+                            }
+                        })
+                    }).collect::<Vec<_>>())
+                } else {
+                    serde_json::json!([{"text": msg.content}])
+                }
             })
         }).collect()
     }
@@ -621,7 +846,7 @@ impl AiClient {
                     MessageRole::System => "system",
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
-                    MessageRole::Tool => "user",
+                    MessageRole::Tool => "user", // Ollama typically treats tool results as user messages
                 },
                 "content": msg.content
             })
@@ -640,12 +865,14 @@ impl AiClient {
 #[derive(Clone)]
 pub struct OpenAIClient {
     client: Client,
+    model: String,
 }
 
 impl OpenAIClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: String) -> Self {
         Self {
             client: Client::new(api_key),
+            model,
         }
     }
 }
@@ -656,25 +883,53 @@ impl AIClient for OpenAIClient {
         Box::new(self.clone())
     }
 
-    async fn stream_text(&self, messages: Vec<Message>) -> Result<Box<dyn Stream<Item = Result<String, AIClientError>> + Send + Unpin>, AIClientError> {
+    async fn stream_response(&self, messages: Vec<Message>, tools: Option<Vec<crate::agent_mode_eval::tools::Tool>>) -> Result<Box<dyn Stream<Item = Result<AIStreamChunk, AIClientError>> + Send + Unpin>, AIClientError> {
         let openai_messages: Vec<OpenAIMessage> = messages
             .into_iter()
-            .map(|msg| OpenAIMessage {
-                role: match msg.role {
-                    MessageRole::User => Role::User,
-                    MessageRole::Assistant => Role::Assistant,
-                    MessageRole::System => Role::System,
-                },
-                content: msg.content,
-                name: None, // Not used for now
+            .map(|msg| {
+                let mut openai_msg = OpenAIMessage {
+                    role: match msg.role {
+                        MessageRole::User => Role::User,
+                        MessageRole::Assistant => Role::Assistant,
+                        MessageRole::System => Role::System,
+                        MessageRole::Tool => Role::Tool,
+                    },
+                    content: msg.content,
+                    name: None,
+                };
+
+                if let Some(tool_calls) = msg.tool_calls {
+                    openai_msg.tool_calls = Some(tool_calls.into_iter().map(|tc| openai_api::chat::ToolCall {
+                        id: tc.id,
+                        r#type: "function".to_string(),
+                        function: openai_api::chat::Function {
+                            name: tc.name,
+                            arguments: tc.arguments.to_string(),
+                        },
+                    }).collect());
+                    openai_msg.content = "".to_string(); // Content is null for tool_calls
+                }
+
+                if let Some(tool_results) = msg.tool_results {
+                    openai_msg.tool_call_id = Some(tool_results[0].tool_call_id.clone());
+                    openai_msg.content = tool_results[0].content.clone();
+                }
+                openai_msg
             })
             .collect();
 
-        let request = ChatCompletionRequest::new(
-            "gpt-4o".to_string(), // Use gpt-4o as default
+        let mut request = ChatCompletionRequest::new(
+            self.model.clone(),
             openai_messages,
         )
         .stream(true);
+
+        if let Some(tools_def) = tools {
+            if !tools_def.is_empty() {
+                request = request.tools(tools_def.iter().map(|tool| tool.to_openai_format()).collect());
+                request = request.tool_choice(openai_api::chat::ToolChoice::Auto);
+            }
+        }
 
         let response = self.client.chat_completion_create(request).await
             .map_err(|e| AIClientError::APIError(format!("Failed to create chat completion: {}", e)))?;
@@ -684,10 +939,38 @@ impl AIClient for OpenAIClient {
                 chunk_result
                     .map_err(|e| AIClientError::StreamError(format!("Error receiving chunk: {}", e)))
                     .and_then(|chunk: ChatCompletionChunk| {
-                        chunk.choices.into_iter().next().map(|choice| {
-                            choice.delta.content.unwrap_or_default()
-                        }).ok_or(AIClientError::StreamError("No content in chunk".to_string()))
+                        let mut text_content = String::new();
+                        let mut tool_calls_list: Vec<AgentToolCall> = Vec::new();
+
+                        if let Some(choice) = chunk.choices.into_iter().next() {
+                            if let Some(content) = choice.delta.content {
+                                text_content = content;
+                            }
+                            if let Some(tool_calls) = choice.delta.tool_calls {
+                                for tc_delta in tool_calls {
+                                    tool_calls_list.push(AgentToolCall {
+                                        id: tc_delta.id.unwrap_or_default(),
+                                        name: tc_delta.function.name.unwrap_or_default(),
+                                        arguments: serde_json::Value::String(tc_delta.function.arguments.unwrap_or_default()),
+                                    });
+                                }
+                            }
+                        }
+
+                        if !tool_calls_list.is_empty() {
+                            Ok(AIStreamChunk::ToolCall(tool_calls_list))
+                        } else if !text_content.is_empty() {
+                            Ok(AIStreamChunk::Text(text_content))
+                        } else {
+                            Ok(AIStreamChunk::Done) // If no content or tool calls, consider it done for this chunk
+                        }
                     })
+            })
+            .filter_map(|res| async move {
+                match res {
+                    Ok(AIStreamChunk::Done) => None, // Filter out intermediate Done chunks
+                    other => Some(other),
+                }
             });
 
         Ok(Box::new(stream))

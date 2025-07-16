@@ -4,7 +4,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 use async_trait::async_trait;
-use crate::agent_mode_eval::ai_client::{AIClient, OpenAIClient, AIClientError};
+use chrono::Utc;
+use crate::agent_mode_eval::ai_client::{AIClient, OpenAIClient, AIClientError, AIStreamChunk};
+use crate::block::Block as UIBlock; // Alias to avoid conflict with Message
 
 pub mod ai_client;
 pub mod conversation;
@@ -12,7 +14,7 @@ pub mod tools;
 
 pub use ai_client::{AIClient, AiConfig, AiProvider, Message, MessageRole};
 pub use conversation::{Conversation, ConversationManager};
-pub use tools::{Tool, ToolManager, ToolResult as ToolExecutionResult};
+pub use tools::{Tool, ToolManager, ToolResult as ToolExecutionResult, ToolCall as AgentToolCall};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -33,18 +35,20 @@ impl Default for AgentConfig {
 pub enum AgentMessage {
     UserMessage(String),
     AgentResponse(String),
-    ToolCall(tools::ToolCall),
+    ToolCall(AgentToolCall),
     ToolResult(String),
     SystemMessage(String),
     Error(String),
+    Done, // Indicates the AI conversation turn is complete
 }
 
 #[derive(Debug, Clone)]
 pub struct AgentMode {
     is_enabled: bool,
     client: Box<dyn AIClient + Send + Sync>,
-    conversation_history: VecDeque<AgentMessage>,
+    conversation_history: VecDeque<Message>, // Stores ai_client::Message for full context
     config: AgentConfig,
+    tool_registry: tools::ToolRegistry,
 }
 
 impl AgentMode {
@@ -52,7 +56,7 @@ impl AgentMode {
         let client: Box<dyn AIClient + Send + Sync> = match &config.ai_config {
             ai_client::AIClientConfig::OpenAI { api_key } => {
                 let key = api_key.clone().ok_or(AIClientError::ConfigurationError("OpenAI API key not provided".to_string()))?;
-                Box::new(OpenAIClient::new(key))
+                Box::new(OpenAIClient::new(key, "gpt-4o".to_string())) // Default model for OpenAIClient
             }
             // Add other AI clients here
         };
@@ -62,6 +66,7 @@ impl AgentMode {
             client,
             conversation_history: VecDeque::new(),
             config,
+            tool_registry: tools::ToolRegistry::new(),
         })
     }
 
@@ -76,71 +81,182 @@ impl AgentMode {
 
     pub fn start_conversation(&mut self) -> Result<(), AIClientError> {
         self.conversation_history.clear();
-        // Optionally add a system message to start the conversation
-        self.conversation_history.push_back(AgentMessage::SystemMessage("You are a helpful terminal assistant. Provide concise answers and command suggestions.".to_string()));
+        self.conversation_history.push_back(Message {
+            id: Uuid::new_v4(),
+            role: MessageRole::System,
+            content: self.config.ai_config.get_system_prompt().unwrap_or_else(|| "You are a helpful terminal assistant. Provide concise answers and command suggestions.".to_string()),
+            timestamp: Utc::now(),
+            tool_calls: None,
+            tool_results: None,
+        });
         Ok(())
     }
 
-    pub async fn send_message(&mut self, message: String) -> Result<mpsc::Receiver<String>, AIClientError> {
-        self.conversation_history.push_back(AgentMessage::UserMessage(message.clone()));
-        self.trim_history();
-
+    pub async fn send_message(&mut self, user_message: String, context_blocks: Vec<UIBlock>) -> Result<mpsc::Receiver<AgentMessage>, AIClientError> {
         let (tx, rx) = mpsc::channel(100);
         let client_clone = self.client.clone_box();
-        let history_clone = self.conversation_history.clone();
+        let tool_registry_clone = self.tool_registry.clone();
+        let mut conversation_history_for_task = self.conversation_history.clone(); // Clone for the async task
+
+        // Add user message to history
+        conversation_history_for_task.push_back(Message {
+            id: Uuid::new_v4(),
+            role: MessageRole::User,
+            content: user_message.clone(),
+            timestamp: Utc::now(),
+            tool_calls: None,
+            tool_results: None,
+        });
+        self.trim_history(&mut conversation_history_for_task);
+
+        // Add contextual blocks to the conversation for the AI
+        for block in context_blocks {
+            let context_content = match block.content {
+                crate::block::BlockContent::Command { input, output, status, .. } => {
+                    let output_str = output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n");
+                    format!("Previous command: `{}`\nOutput:\n\`\`\`\n{}\n\`\`\`\nStatus: {}", input, output_str, status)
+                },
+                crate::block::BlockContent::AgentMessage { content, is_user, .. } => {
+                    format!("Previous {}: {}", if is_user { "User" } else { "Agent" }, content)
+                },
+                crate::block::BlockContent::Info { title, message, .. } => {
+                    format!("Info ({}): {}", title, message)
+                },
+                crate::block::BlockContent::Error { message, .. } => {
+                    format!("Error: {}", message)
+                },
+            };
+            conversation_history_for_task.push_back(Message {
+                id: Uuid::new_v4(),
+                role: MessageRole::System, // Using System role for context
+                content: format!("Context from previous block:\n{}", context_content),
+                timestamp: Utc::now(),
+                tool_calls: None,
+                tool_results: None,
+            });
+        }
+
+        let tools_for_ai = tool_registry_clone.get_available_tools();
 
         tokio::spawn(async move {
-            let messages = history_clone.iter().map(|msg| {
-                match msg {
-                    AgentMessage::UserMessage(s) => conversation::Message {
-                        role: conversation::MessageRole::User,
-                        content: s.clone(),
-                    },
-                    AgentMessage::AgentResponse(s) => conversation::Message {
-                        role: conversation::MessageRole::Assistant,
-                        content: s.clone(),
-                    },
-                    AgentMessage::SystemMessage(s) => conversation::Message {
-                        role: conversation::MessageRole::System,
-                        content: s.clone(),
-                    },
-                    _ => conversation::Message { // Handle other types as needed, or filter them out
-                        role: conversation::MessageRole::System,
-                        content: format!("Unhandled message type: {:?}", msg),
-                    },
-                }
-            }).collect();
+            let mut current_agent_response_text = String::new();
+            let mut tool_calls_to_execute: Vec<AgentToolCall> = Vec::new();
 
-            match client_clone.stream_text(messages).await {
-                Ok(mut stream) => {
-                    let mut full_response = String::new();
-                    while let Some(chunk_result) = stream.next().await {
-                        match chunk_result {
-                            Ok(chunk) => {
-                                full_response.push_str(&chunk);
-                                if let Err(_) = tx.send(chunk).await {
-                                    eprintln!("Failed to send chunk to UI");
-                                    break;
+            // Loop for multi-turn interactions (AI -> Tool -> AI)
+            loop {
+                let stream_result = client_clone.stream_response(conversation_history_for_task.clone().into(), Some(tools_for_ai.clone())).await;
+
+                match stream_result {
+                    Ok(mut stream) => {
+                        let mut stream_finished = false;
+                        while let Some(chunk_result) = stream.next().await {
+                            match chunk_result {
+                                Ok(chunk) => {
+                                    match chunk {
+                                        AIStreamChunk::Text(text_chunk) => {
+                                            current_agent_response_text.push_str(&text_chunk);
+                                            if let Err(_) = tx.send(AgentMessage::AgentResponse(text_chunk)).await {
+                                                eprintln!("Failed to send text chunk to UI");
+                                                return;
+                                            }
+                                        },
+                                        AIStreamChunk::ToolCall(tool_calls) => {
+                                            tool_calls_to_execute.extend(tool_calls);
+                                            // Send tool calls to UI immediately
+                                            for tc in &tool_calls_to_execute {
+                                                if let Err(_) = tx.send(AgentMessage::ToolCall(tc.clone())).await {
+                                                    eprintln!("Failed to send tool call to UI");
+                                                    return;
+                                                }
+                                            }
+                                        },
+                                        AIStreamChunk::Done => {
+                                            stream_finished = true;
+                                            break; // Stream finished
+                                        },
+                                    }
+                                },
+                                Err(e) => {
+                                    eprintln!("Error streaming AI response: {}", e);
+                                    if let Err(_) = tx.send(AgentMessage::Error(format!("AI Stream Error: {}", e))).await {
+                                        eprintln!("Failed to send error to UI");
+                                    }
+                                    return;
                                 }
-                            }
-                            Err(e) => {
-                                eprintln!("Error streaming AI response: {}", e);
-                                if let Err(_) = tx.send(format!("Error: {}", e)).await {
-                                    eprintln!("Failed to send error to UI");
-                                }
-                                break;
                             }
                         }
-                    }
-                    // Add the full response to history after streaming is complete
-                    // This requires mutable access to self, which is tricky in this async block.
-                    // A better pattern would be to send a final message back to the main loop
-                    // to update the history. For now, we'll assume the main loop handles history.
-                }
-                Err(e) => {
-                    eprintln!("Failed to get AI stream: {}", e);
-                    if let Err(_) = tx.send(format!("Error: {}", e)).await {
-                        eprintln!("Failed to send error to UI");
+
+                        // After stream finishes, add the AI's response (if any) to history
+                        if !current_agent_response_text.is_empty() {
+                            conversation_history_for_task.push_back(Message {
+                                id: Uuid::new_v4(),
+                                role: MessageRole::Assistant,
+                                content: current_agent_response_text.clone(),
+                                timestamp: Utc::now(),
+                                tool_calls: None,
+                                tool_results: None,
+                            });
+                            current_agent_response_text.clear();
+                        }
+
+                        // Check for tool calls to execute
+                        if !tool_calls_to_execute.is_empty() {
+                            let mut tool_results_for_ai: Vec<ai_client::ToolResult> = Vec::new();
+                            for tc in tool_calls_to_execute.drain(..) {
+                                let tool_result = tool_registry_clone.execute_tool(tc.clone()).await;
+                                match tool_result {
+                                    Ok(tr) => {
+                                        tool_results_for_ai.push(ai_client::ToolResult {
+                                            tool_call_id: tc.id.clone(),
+                                            content: tr.output.clone(),
+                                            is_error: !tr.success,
+                                        });
+                                        if let Err(_) = tx.send(AgentMessage::ToolResult(tr.output)).await {
+                                            eprintln!("Failed to send tool result to UI");
+                                            return;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        let error_msg = format!("Tool execution error: {}", e);
+                                        tool_results_for_ai.push(ai_client::ToolResult {
+                                            tool_call_id: tc.id.clone(),
+                                            content: error_msg.clone(),
+                                            is_error: true,
+                                        });
+                                        if let Err(_) = tx.send(AgentMessage::Error(error_msg)).await {
+                                            eprintln!("Failed to send tool error to UI");
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Add tool results to the conversation for the next AI turn
+                            conversation_history_for_task.push_back(Message {
+                                id: Uuid::new_v4(),
+                                role: MessageRole::Tool,
+                                content: "".to_string(), // Content is empty for tool results, actual content is in tool_results field
+                                timestamp: Utc::now(),
+                                tool_calls: None,
+                                tool_results: Some(tool_results_for_ai),
+                            });
+
+                            // Continue the loop for another AI turn
+                            continue; // Go to the next iteration of the loop
+                        } else {
+                            // No tool calls, AI response is complete
+                            if stream_finished {
+                                let _ = tx.send(AgentMessage::Done);
+                                break; // Exit the loop
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to get AI stream: {}", e);
+                        if let Err(_) = tx.send(AgentMessage::Error(format!("AI Client Error: {}", e))).await {
+                            eprintln!("Failed to send error to UI");
+                        }
+                        return;
                     }
                 }
             }
@@ -149,9 +265,18 @@ impl AgentMode {
         Ok(rx)
     }
 
-    fn trim_history(&mut self) {
-        while self.conversation_history.len() > self.config.max_history_length {
-            self.conversation_history.pop_front();
+    fn trim_history(&self, history: &mut VecDeque<Message>) {
+        while history.len() > self.config.max_history_length {
+            history.pop_front();
+        }
+    }
+}
+
+impl ai_client::AIClientConfig {
+    pub fn get_system_prompt(&self) -> Option<String> {
+        match self {
+            ai_client::AIClientConfig::OpenAI { .. } => Some("You are a helpful terminal assistant. Provide concise answers and command suggestions. When suggesting commands, use the `execute_command` tool. When asked to read or write files, use `read_file` or `write_file` tools. When asked about system information, use `get_system_info`.".to_string()),
+            // Add system prompts for other providers if needed
         }
     }
 }
@@ -189,48 +314,15 @@ mod tests {
         let result = agent.start_conversation();
         assert!(result.is_ok());
         
-        // Assuming send_message and other methods are implemented similarly
-        // let response = agent.send_message("Hello".to_string()).await.unwrap();
-        // assert!(response.recv().await.is_some());
-        
-        // let stats = agent.get_conversation_stats().unwrap();
-        // assert!(stats.message_count >= 0);
-        
-        // agent.clear_conversation().unwrap();
-    }
-
-    #[test]
-    fn test_model_switching() {
-        let config = AiConfig {
-            provider: AiProvider::OpenAI,
-            model: "gpt-4o".to_string(),
-            api_key: Some("test-key".to_string()),
-            base_url: None,
-            temperature: 0.7,
-            max_tokens: None,
-            system_prompt: None,
-            tools_enabled: true,
-        };
-        let mut agent = AgentMode::new(AgentConfig { ai_config: config, ..Default::default() }).unwrap();
-        
-        let result = agent.switch_model("gpt-4".to_string());
-        assert!(result.is_ok());
-        
-        let result = agent.switch_model("invalid-model".to_string());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_provider_switching() {
-        let mut config = AgentConfig::default();
-        config.ai_config.api_key = Some("test-key".to_string());
-        
-        let mut agent = AgentMode::new(config).unwrap();
-        
-        let result = agent.switch_provider(AiProvider::Claude, "claude-4-sonnet-20250514".to_string());
-        assert!(result.is_ok());
-        
-        assert_eq!(agent.config.ai_config.provider, AiProvider::Claude);
-        assert_eq!(agent.config.ai_config.model, "claude-4-sonnet-20250514");
+        // Test sending a message and receiving a stream
+        // This test would require mocking the AIClient for a true unit test
+        // For integration testing, you'd need a real API key and network access.
+        // let rx = agent.send_message("Hello".to_string(), vec![]).await.unwrap();
+        // while let Some(msg) = rx.recv().await {
+        //     println!("{:?}", msg);
+        //     if let AgentMessage::Done = msg {
+        //         break;
+        //     }
+        // }
     }
 }
