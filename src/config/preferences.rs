@@ -44,6 +44,7 @@ pub struct UserPreferences {
     pub ai_model: String,
     pub ai_temperature: f32,
     pub ai_max_tokens: u32,
+    pub ai_provider_type: String, // New field for AI provider type
     pub keybindings_file: String,
     pub enable_performance_profiling: bool,
     pub enable_wasm_plugins: bool,
@@ -290,6 +291,7 @@ impl Default for UserPreferences {
             ai_model: "gpt-4o".to_string(),
             ai_temperature: 0.7,
             ai_max_tokens: 500,
+            ai_provider_type: "openai".to_string(), // Default to OpenAI
             keybindings_file: "keybindings.yaml".to_string(),
             enable_performance_profiling: true,
             enable_wasm_plugins: true,

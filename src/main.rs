@@ -91,6 +91,7 @@ use mcq::McqManager;
 use natural_language_detection::NaturalLanguageDetector;
 use resources::ResourceManager;
 use settings::SettingsManager;
+use shell::ShellManager;
 use string_offset::StringOffsetManager;
 use sum_tree::SumTreeManager;
 use syntax_tree::SyntaxTreeManager;

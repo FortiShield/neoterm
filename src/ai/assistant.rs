@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use serde_json::Value;
 
 pub struct Assistant {
     provider: Box<dyn AIProvider + Send + Sync>,

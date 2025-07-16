@@ -8,10 +8,6 @@ pub mod openai;
 pub mod ollama;
 pub mod anthropic;
 
-pub use openai::OpenAIProvider;
-pub use ollama::OllamaProvider;
-pub use anthropic::AnthropicProvider;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -33,7 +29,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolFunction {
     pub name: String,
-    pub arguments: Value, // JSON object for arguments
+    pub arguments: Value, // JSON object
 }
 
 #[async_trait]
