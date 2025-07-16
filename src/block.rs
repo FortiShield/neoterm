@@ -5,7 +5,7 @@ use iced::{
 use uuid::Uuid;
 use chrono::{DateTime, Local};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color as TuiColor, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as TuiBlock, Borders, Paragraph};
 use ratatui::Frame;
@@ -52,15 +52,15 @@ impl BlockState {
 
     pub fn render(&self, frame: &mut Frame) {
         let border_style = if self.is_active {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(TuiColor::Cyan)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(TuiColor::White)
         };
 
         let block = TuiBlock::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(Span::styled(self.title.clone(), Style::default().fg(Color::LightGreen)));
+            .title(Span::styled(self.title.clone(), Style::default().fg(TuiColor::LightGreen)));
 
         let paragraph = Paragraph::new(self.content.clone())
             .block(block)
@@ -306,6 +306,12 @@ impl Block {
             button(text("🗑️")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Delete)).style(iced::widget::button::text::Style::Text),
             button(text("📤")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Export)).style(iced::widget::button::text::Style::Text),
             button(text("🤖")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SendToAI)).style(iced::widget::button::text::Style::Text), // New: Send to AI
+            // Conditionally show "Fix" button for failed command blocks
+            if let BlockContent::Command { error: true, .. } = self.content {
+                button(text("🛠️ Fix")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SuggestFix)).style(iced::widget::button::text::Style::Text).into()
+            } else {
+                iced::widget::Space::new(Length::Fixed(0.0), Length::Fixed(0.0)).into() // Empty space if not applicable
+            }
         ]
         .spacing(5)
         .align_items(alignment::Horizontal::Center);

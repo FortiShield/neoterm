@@ -55,18 +55,16 @@ impl Assistant {
         let system_prompt = self.prompt_builder.build_fix_prompt(&self.context, code_snippet, error_message);
         let user_message = ChatMessage {
             role: "user".to_string(),
-            content: Some(format!("Please fix the following code:\n```\n{}\n```\nError: {}", code_snippet, error_message)),
+            content: Some(format!("Failed command: `{}`\nError: {}", code_snippet, error_message)),
             tool_calls: None,
             tool_call_id: None,
         };
 
-        let mut messages = vec![system_prompt];
-        messages.extend(self.conversation_history.clone());
-        messages.push(user_message);
+        let messages = vec![system_prompt, user_message]; // No history for fix to keep it focused
 
         let response = self.provider.chat_completion(messages, None).await?;
-        self.conversation_history.push(response.clone());
-        Ok(response.content.unwrap_or_default())
+        // Do NOT add to conversation history, as this is a specific command generation/fix, not general chat.
+        Ok(response.content.unwrap_or_default().trim().to_string()) // Trim to remove any leading/trailing whitespace
     }
 
     pub async fn explain(&mut self, text_to_explain: &str) -> Result<String> {
