@@ -17,6 +17,7 @@ use tools::ToolManager;
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use crate::workflows::Workflow; // Import Workflow
 
 pub mod ai_client;
 pub mod conversation;
@@ -39,6 +40,15 @@ pub enum AgentMessage {
     SystemMessage(String),
     Error(String),
     Done,
+    WorkflowSuggested(Workflow), // New: AI suggests a multi-step workflow
+    AgentPromptRequest { // New: Agent requests user input during a workflow
+        prompt_id: String,
+        message: String,
+    },
+    AgentPromptResponse { // New: User's response to an agent prompt
+        prompt_id: String,
+        response: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -63,23 +73,26 @@ impl Default for AgentConfig {
 }
 
 pub struct AgentMode {
-    assistant: Assistant,
+    assistant: Arc<RwLock<Assistant>>, // Wrap Assistant in Arc<RwLock>
+    config: AgentConfig,
     is_active: bool,
-    conversation: Conversation,
-    // Add other state relevant to agent mode, e.g., tool definitions
+    // Channel to send messages from the agent's internal processing to the UI
+    message_sender: mpsc::Sender<AgentMessage>,
+    message_receiver: mpsc::Receiver<AgentMessage>,
+    // State for interactive workflows
+    active_workflow_prompt_tx: HashMap<String, mpsc::Sender<String>>, // prompt_id -> sender for user response
 }
 
 impl AgentMode {
-    pub fn new(config: AgentConfig) -> Result<Self> {
-        let assistant = Assistant::new(
-            &config.provider_type,
-            config.api_key,
-            config.model,
-        )?;
+    pub fn new(config: AgentConfig, assistant: Arc<RwLock<Assistant>>) -> Result<Self> {
+        let (tx, rx) = mpsc::channel(100); // Channel for agent messages to UI
         Ok(Self {
             assistant,
+            config,
             is_active: false,
-            conversation: Conversation::new(),
+            message_sender: tx,
+            message_receiver: rx,
+            active_workflow_prompt_tx: HashMap::new(),
         })
     }
 
@@ -93,223 +106,139 @@ impl AgentMode {
     }
 
     pub async fn start_conversation(&mut self) -> Result<()> {
-        self.assistant.clear_history();
-        self.conversation.clear();
-        // Optionally send an initial system message to the assistant
-        // self.assistant.stream_chat("Hello! How can I help you today?").await?;
+        let mut assistant_lock = self.assistant.write().await;
+        assistant_lock.clear_history();
+        // Optionally send an initial system message or greeting
+        let _ = self.message_sender.send(AgentMessage::SystemMessage("Agent mode activated. How can I help you?".to_string())).await;
         Ok(())
     }
 
     pub async fn send_message(&mut self, user_input: String, context_blocks: Vec<Block>) -> Result<mpsc::Receiver<AgentMessage>> {
-        if !self.is_active {
-            return Err(anyhow!("Agent mode is not active."));
-        }
+        let sender_clone = self.message_sender.clone();
+        let assistant_arc_clone = self.assistant.clone(); // Clone the Arc for the spawned task
 
-        // Add user message to internal conversation history
-        self.conversation.add_message(Message {
-            id: Uuid::new_v4(),
-            role: MessageRole::User,
-            content: user_input.clone(),
-            timestamp: chrono::Utc::now(),
+        // Add user message to history
+        let mut assistant_lock = assistant_arc_clone.write().await;
+        assistant_lock.conversation_history.push(crate::ai::providers::ChatMessage {
+            role: "user".to_string(),
+            content: Some(user_input.clone()),
             tool_calls: None,
-            tool_results: None,
+            tool_call_id: None,
         });
-
-        // Prepare context for the AI assistant
-        let mut full_user_message = user_input;
-        if !context_blocks.is_empty() {
-            full_user_message.push_str("\n\n--- Context from Blocks ---\n");
-            for block in context_blocks {
-                full_user_message.push_str(&format!("Block Type: {:?}\n", block.block_type));
-                full_user_message.push_str(&format!("Content:\n{}\n", match block.content {
-                    BlockContent::Command { input, output, .. } => format!("Command: {}\nOutput:\n{}", input, output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n")),
-                    BlockContent::AgentMessage { content, .. } => content,
-                    BlockContent::Info { message, .. } => message,
-                    BlockContent::Error { message, .. } => message,
-                    BlockContent::Welcome => "Welcome message".to_string(),
-                    BlockContent::Terminal => "Terminal block".to_string(),
-                    BlockContent::BenchmarkResults => "Benchmark results".to_string(),
-                    BlockContent::Output { output, .. } => output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n"),
-                }));
-                full_user_message.push_str("---\n");
-            }
-        }
-
-        // Stream response from the AI assistant
-        let mut stream_rx = self.assistant.stream_chat(&full_user_message).await?;
-        let (tx, rx) = mpsc::channel(100);
-
-        let conversation_arc = Arc::new(RwLock::new(self.conversation.clone())); // Clone for async task
+        drop(assistant_lock); // Release lock before async operations
 
         tokio::spawn(async move {
-            let mut assistant_response_content = String::new();
-            let mut tool_calls_buffer: Vec<ProviderChatMessage> = Vec::new(); // Use the new ToolCall type
+            let mut assistant_lock = assistant_arc_clone.write().await; // Get write lock inside the task
 
-            while let Some(chat_msg) = stream_rx.recv().await {
-                if !chat_msg.content.is_empty() {
-                    assistant_response_content.push_str(&chat_msg.content);
-                    if tx.send(AgentMessage::AgentResponse(chat_msg.content)).await.is_err() {
-                        break;
+            // Check for workflow inference intent
+            let lower_input = user_input.to_lowercase();
+            let is_workflow_request = lower_input.contains("workflow") ||
+                                      lower_input.contains("automate") ||
+                                      lower_input.contains("sequence of steps") ||
+                                      lower_input.contains("multi-step task");
+
+            if is_workflow_request {
+                match assistant_lock.infer_workflow(&user_input).await {
+                    Ok(workflow) => {
+                        log::info!("AI inferred workflow: {}", workflow.name);
+                        let _ = sender_clone.send(AgentMessage::WorkflowSuggested(workflow)).await;
+                    },
+                    Err(e) => {
+                        log::error!("Failed to infer workflow: {}", e);
+                        let _ = sender_clone.send(AgentMessage::Error(format!("Failed to infer workflow: {}", e))).await;
                     }
                 }
-                if let Some(tcs) = chat_msg.tool_calls {
-                    tool_calls_buffer.extend(tcs);
-                    // For simplicity, send tool calls as soon as they appear.
-                    // A more robust implementation might wait for full tool call arguments.
-                    for tc in tool_calls_buffer.drain(..) {
-                        if tx.send(AgentMessage::ToolCall(tc.into())).await.is_err() { // Convert to AgentToolCall
-                            break;
+            } else {
+                // Existing general chat logic
+                let stream_result = assistant_lock.stream_chat(&user_input).await;
+                match stream_result {
+                    Ok(mut rx) => {
+                        let mut full_response_content = String::new();
+                        while let Some(msg) = rx.recv().await {
+                            match msg.role.as_str() {
+                                "assistant" => {
+                                    if let Some(content) = msg.content {
+                                        full_response_content.push_str(&content);
+                                        if sender_clone.send(AgentMessage::AgentResponse(content)).await.is_err() {
+                                            log::warn!("Agent message receiver dropped during streaming.");
+                                            break;
+                                        }
+                                    }
+                                },
+                                "tool_calls" => {
+                                    if let Some(tool_calls) = msg.tool_calls {
+                                        for tool_call in tool_calls {
+                                            let agent_tool_call = AgentToolCall {
+                                                id: tool_call.id,
+                                                name: tool_call.function.name,
+                                                arguments: tool_call.function.arguments,
+                                            };
+                                            if sender_clone.send(AgentMessage::ToolCall(agent_tool_call)).await.is_err() {
+                                                log::warn!("Agent message receiver dropped during tool call.");
+                                                break;
+                                            }
+                                            // TODO: Execute tool and send result back to assistant
+                                        }
+                                    }
+                                },
+                                _ => {} // Ignore other roles for now
+                            }
                         }
+                        // Add the full response to the assistant's history
+                        assistant_lock.conversation_history.push(crate::ai::providers::ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(full_response_content),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                    },
+                    Err(e) => {
+                        let _ = sender_clone.send(AgentMessage::Error(format!("AI stream error: {}", e))).await;
                     }
                 }
             }
-
-            // Add the full assistant response to conversation history
-            if !assistant_response_content.is_empty() {
-                let mut conv = conversation_arc.write().await;
-                conv.add_message(Message {
-                    id: Uuid::new_v4(),
-                    role: MessageRole::Assistant,
-                    content: assistant_response_content,
-                    timestamp: chrono::Utc::now(),
-                    tool_calls: None, // Tool calls are handled separately
-                    tool_results: None,
-                });
-            }
-            
-            let _ = tx.send(AgentMessage::Done).await;
+            let _ = sender_clone.send(AgentMessage::Done).await;
         });
+
+        Ok(self.message_receiver.clone()) // Return a clone of the receiver for the UI to subscribe
+    }
+
+    // New method for command generation
+    pub async fn generate_command(&mut self, natural_language_query: &str) -> Result<String> {
+        let mut assistant_lock = self.assistant.write().await; // Get write lock
+        assistant_lock.generate_command(natural_language_query).await
+    }
+
+    // New method for explaining output
+    pub async fn explain_output(&mut self, command_input: &str, output: &str, error_message: Option<&str>) -> Result<String> {
+        let mut assistant_lock = self.assistant.write().await;
+        assistant_lock.explain_output(command_input, output, error_message).await
+    }
+
+    /// Handles a user's response to an agent prompt during workflow execution.
+    pub async fn handle_agent_prompt_response(&mut self, prompt_id: String, response: String) -> Result<()> {
+        if let Some(tx) = self.active_workflow_prompt_tx.remove(&prompt_id) {
+            tx.send(response).await
+                .map_err(|e| anyhow!("Failed to send response to workflow executor: {}", e))?;
+            Ok(())
+        } else {
+            Err(anyhow!("No active prompt found for ID: {}", prompt_id))
+        }
+    }
+
+    /// Requests user input for an agent prompt step in a workflow.
+    /// Returns a receiver that will get the user's response.
+    pub async fn request_agent_prompt_input(&mut self, prompt_id: String, message: String) -> Result<mpsc::Receiver<String>> {
+        let (tx, rx) = mpsc::channel(1); // Channel for this specific prompt response
+        self.active_workflow_prompt_tx.insert(prompt_id.clone(), tx);
+        
+        // Send the prompt request to the UI
+        self.message_sender.send(AgentMessage::AgentPromptRequest {
+            prompt_id,
+            message,
+        }).await?;
 
         Ok(rx)
-    }
-
-    pub async fn get_conversation_history(&self) -> Vec<Message> {
-        self.conversation.get_messages().await
-    }
-
-    pub async fn reset_conversation(&mut self) {
-        self.assistant.clear_history();
-        self.conversation.clear();
-    }
-}
-
-// Helper to convert ai::providers::ToolCall to agent_mode_eval::tools::ToolCall
-impl From<ProviderChatMessage> for AgentToolCall {
-    fn from(val: ProviderChatMessage) -> Self {
-        AgentToolCall {
-            id: val.id,
-            name: val.function.name,
-            arguments: val.function.arguments,
-        }
-    }
-}
-
-pub struct AgentModeEvaluator {
-    ai_client: Arc<dyn AIClient>,
-    tool_manager: Arc<Mutex<ToolManager>>,
-    current_conversation: Arc<Mutex<Conversation>>,
-    system_prompt: String,
-}
-
-impl AgentModeEvaluator {
-    pub fn new(ai_config: AiConfig, initial_system_prompt: String) -> Self {
-        let ai_client = Arc::new(OpenAIClient::new(ai_config));
-        let tool_manager = Arc::new(Mutex::new(ToolManager::new()));
-        let conversation_id = uuid::Uuid::new_v4().to_string();
-        let current_conversation = Arc::new(Mutex::new(Conversation::new(conversation_id)));
-
-        // Add initial system message to conversation
-        let mut conv = current_conversation.blocking_lock();
-        conv.add_message(Message {
-            id: Uuid::new_v4(),
-            role: MessageRole::System,
-            content: initial_system_prompt.clone(),
-            timestamp: chrono::Utc::now(),
-            tool_calls: None,
-            tool_results: None,
-        });
-        drop(conv); // Release the lock
-
-        AgentModeEvaluator {
-            ai_client,
-            tool_manager,
-            current_conversation,
-            system_prompt: initial_system_prompt,
-        }
-    }
-
-    pub async fn init(&self) -> Result<()> {
-        // Initialize tools if necessary
-        let mut tool_manager = self.tool_manager.lock().await;
-        tool_manager.register_default_tools().await?;
-        Ok(())
-    }
-
-    pub async fn handle_user_input(&self, input: String) -> Result<Vec<Message>> {
-        let mut conversation = self.current_conversation.lock().await;
-        conversation.add_message(Message {
-            id: Uuid::new_v4(),
-            role: MessageRole::User,
-            content: input.clone(),
-            timestamp: chrono::Utc::now(),
-            tool_calls: None,
-            tool_results: None,
-        });
-
-        let mut response_messages = Vec::new();
-        let mut current_messages = conversation.get_messages().to_vec();
-        let tool_manager = self.tool_manager.lock().await;
-        let available_tools = tool_manager.get_all_tools_schema();
-        drop(tool_manager); // Release lock on tool_manager
-
-        loop {
-            log::info!("Sending messages to AI: {:?}", current_messages);
-            let ai_response = self.ai_client.chat_completion(current_messages.clone(), Some(available_tools.clone())).await?;
-            log::info!("Received AI response: {:?}", ai_response);
-
-            conversation.add_message(ai_response.clone());
-            response_messages.push(ai_response.clone());
-
-            if let Some(tool_calls) = ai_response.tool_calls {
-                let tool_manager = self.tool_manager.lock().await;
-                let tool_outputs = conversation.execute_tool_calls(tool_calls, &tool_manager).await?;
-                drop(tool_manager); // Release lock on tool_manager
-
-                for output_msg in tool_outputs {
-                    log::info!("Adding tool output to conversation: {:?}", output_msg);
-                    conversation.add_message(output_msg.clone());
-                    current_messages.push(output_msg); // Add tool output to messages for next AI call
-                }
-                current_messages.push(ai_response); // Add AI's tool_call message to messages for next AI call
-            } else {
-                // If no tool calls, and content is present, the conversation can end.
-                // If content is empty, it might be waiting for tool outputs.
-                if !ai_response.content.is_empty() {
-                    break;
-                }
-            }
-        }
-
-        Ok(response_messages)
-    }
-
-    pub async fn get_conversation_history(&self) -> Vec<Message> {
-        self.current_conversation.lock().await.get_messages().to_vec()
-    }
-
-    pub async fn reset_conversation(&self) {
-        let mut conversation = self.current_conversation.lock().await;
-        let conversation_id = uuid::Uuid::new_v4().to_string();
-        *conversation = Conversation::new(conversation_id);
-        // Re-add the system prompt after reset
-        conversation.add_message(Message {
-            id: Uuid::new_v4(),
-            role: MessageRole::System,
-            content: self.system_prompt.clone(),
-            timestamp: chrono::Utc::now(),
-            tool_calls: None,
-            tool_results: None,
-        });
     }
 }
 
@@ -339,18 +268,30 @@ pub fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::providers::AiConfig;
+    use crate::ai::assistant::Assistant;
 
     #[tokio::test]
     async fn test_agent_mode_creation() {
+        let ai_config = AiConfig::OpenAI {
+            api_key: Some("dummy_key".to_string()),
+            model: "gpt-4o".to_string(),
+        };
+        let assistant = Arc::new(RwLock::new(Assistant::new("openai", ai_config.api_key().cloned(), ai_config.model().to_string()).unwrap()));
         let config = AgentConfig::default();
-        let agent = AgentMode::new(config).unwrap();
+        let agent = AgentMode::new(config, assistant).unwrap();
         assert_eq!(agent.is_active(), false);
     }
 
     #[tokio::test]
     async fn test_conversation_lifecycle() {
+        let ai_config = AiConfig::OpenAI {
+            api_key: Some("dummy_key".to_string()),
+            model: "gpt-4o".to_string(),
+        };
+        let assistant = Arc::new(RwLock::new(Assistant::new("openai", ai_config.api_key().cloned(), ai_config.model().to_string()).unwrap()));
         let config = AgentConfig::default();
-        let mut agent = AgentMode::new(config).unwrap();
+        let mut agent = AgentMode::new(config, assistant).unwrap();
         
         agent.toggle();
         assert_eq!(agent.is_active(), true);

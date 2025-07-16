@@ -68,7 +68,7 @@ impl Conversation {
                             log::info!("Tool '{}' executed successfully. Output: {}", tool_name, output);
                             tool_messages.push(ChatMessage {
                                 role: "tool".to_string(),
-                                content: output,
+                                content: Some(output), // Content is now Option<String>
                                 tool_calls: None,
                                 tool_call_id: Some(tool_call.id.clone()),
                             });
@@ -77,7 +77,7 @@ impl Conversation {
                             log::error!("Error executing tool '{}': {:?}", tool_name, e);
                             tool_messages.push(ChatMessage {
                                 role: "tool".to_string(),
-                                content: format!("Error: {:?}", e),
+                                content: Some(format!("Error: {:?}", e)), // Content is now Option<String>
                                 tool_calls: None,
                                 tool_call_id: Some(tool_call.id.clone()),
                             });
@@ -88,7 +88,7 @@ impl Conversation {
                     log::warn!("Tool '{}' not found.", tool_name);
                     tool_messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: format!("Error: Tool '{}' not found.", tool_name),
+                        content: Some(format!("Error: Tool '{}' not found.", tool_name)), // Content is now Option<String>
                         tool_calls: None,
                         tool_call_id: Some(tool_call.id.clone()),
                     });

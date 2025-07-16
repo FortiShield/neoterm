@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use uuid::Uuid; // Import Uuid for generating unique IDs for workflows and steps
 
 pub mod parser;
 pub mod manager;
@@ -16,45 +17,115 @@ pub use debugger::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
+    /// A unique identifier for the workflow.
+    pub id: String,
     /// The name of the Workflow. Required.
     pub name: String,
-    
-    /// The command that is executed when the Workflow is selected. Required.
-    pub command: String,
-    
+    /// The description of the Workflow and what it does. Optional.
+    pub description: Option<String>,
     /// An array of tags that are useful to categorize the Workflow. Optional.
     #[serde(default)]
     pub tags: Vec<String>,
-    
-    /// The description of the Workflow and what it does. Optional.
-    pub description: Option<String>,
-    
     /// The URL from where the Workflow was originally generated from. Optional.
     pub source_url: Option<String>,
-    
     /// The original author of the Workflow. Optional.
     pub author: Option<String>,
-    
     /// The URL of original author of the Workflow. Optional.
     pub author_url: Option<String>,
-    
     /// The list of shells where this Workflow is valid. Optional.
     /// Must be one of: zsh, bash, fish
     pub shells: Option<Vec<Shell>>,
-    
     /// Parameterized arguments for the workflow. Optional.
     #[serde(default)]
     pub arguments: Vec<WorkflowArgument>,
-    
+    /// The sequence of steps to be executed in this workflow.
+    pub steps: Vec<WorkflowStep>,
+    /// Environment variables to be set for the entire workflow.
+    #[serde(default)]
+    pub environment: HashMap<String, String>,
+    /// Timeout for the entire workflow in seconds.
+    pub timeout: Option<u64>,
+
     // Internal metadata
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
-    
     #[serde(skip)]
     pub last_used: Option<chrono::DateTime<chrono::Utc>>,
-    
     #[serde(skip)]
     pub usage_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    /// A unique identifier for the step within the workflow.
+    pub id: String,
+    /// The name of the step.
+    pub name: String,
+    /// The type of action this step performs.
+    #[serde(rename = "type")]
+    pub step_type: WorkflowStepType,
+    /// Optional description for the step.
+    pub description: Option<String>,
+    /// Environment variables specific to this step.
+    #[serde(default)]
+    pub environment: HashMap<String, String>,
+    /// Timeout for this specific step in seconds.
+    pub timeout: Option<u64>,
+    /// Number of times to retry this step on failure.
+    #[serde(default)]
+    pub retry_count: u32,
+    /// A conditional expression that must evaluate to true for the step to execute.
+    pub condition: Option<String>,
+    /// How the output of this step should be processed.
+    #[serde(default)]
+    pub output_format: WorkflowOutputFormat,
+    /// The name of the variable to store the output of this step.
+    pub output_variable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowStepType {
+    /// Executes a shell command.
+    Command {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        working_directory: Option<String>,
+    },
+    /// Prompts the user for input during workflow execution.
+    AgentPrompt {
+        message: String,
+        #[serde(default)]
+        input_variable: Option<String>, // Variable to store user's response
+    },
+    /// Calls an AI tool (e.g., list_files, read_file, execute_command).
+    ToolCall {
+        tool_name: String,
+        arguments: serde_json::Value, // JSON object for tool arguments
+    },
+    /// Executes a sub-workflow.
+    SubWorkflow {
+        workflow_name: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Runs a plugin function.
+    PluginAction {
+        plugin_name: String,
+        action_name: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowOutputFormat {
+    #[default]
+    PlainText,
+    Json,
+    Regex { pattern: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -69,21 +140,16 @@ pub enum Shell {
 pub struct WorkflowArgument {
     /// The name of the argument. Required.
     pub name: String,
-    
     /// The description of the argument. Optional.
     pub description: Option<String>,
-    
     /// The default value for the argument. Optional.
     pub default_value: Option<String>,
-    
     /// The type of argument for validation. Optional.
     #[serde(default)]
     pub arg_type: ArgumentType,
-    
     /// Whether this argument is required. Optional.
     #[serde(default)]
     pub required: bool,
-    
     /// Possible values for this argument (for enum-like arguments). Optional.
     pub options: Option<Vec<String>>,
 }
@@ -134,6 +200,8 @@ pub enum WorkflowError {
     InvalidArgumentValue(String),
     #[error("Workflow not found: {0}")]
     WorkflowNotFound(String),
+    #[error("Execution error: {0}")]
+    ExecutionError(String),
 }
 
 impl Workflow {
@@ -142,6 +210,13 @@ impl Workflow {
         let mut workflow: Workflow = serde_yaml::from_str(yaml_str)
             .map_err(|e| WorkflowError::ParseError(e.to_string()))?;
         
+        // Ensure all steps have unique IDs if not provided
+        for step in &mut workflow.steps {
+            if step.id.is_empty() {
+                step.id = Uuid::new_v4().to_string();
+            }
+        }
+
         workflow.validate()?;
         Ok(workflow)
     }
@@ -176,8 +251,8 @@ impl Workflow {
             return Err(WorkflowError::ValidationError("Name is required".to_string()));
         }
 
-        if self.command.trim().is_empty() {
-            return Err(WorkflowError::ValidationError("Command is required".to_string()));
+        if self.id.trim().is_empty() {
+            return Err(WorkflowError::ValidationError("ID is required".to_string()));
         }
 
         // Validate shell compatibility
@@ -193,14 +268,6 @@ impl Workflow {
                 return Err(WorkflowError::ValidationError("Argument name is required".to_string()));
             }
 
-            // Check if argument is used in command
-            let placeholder = format!("{{{{{}}}}}", arg.name);
-            if !self.command.contains(&placeholder) {
-                return Err(WorkflowError::ValidationError(
-                    format!("Argument '{}' is not used in command", arg.name)
-                ));
-            }
-
             // Validate enum options
             if arg.arg_type == ArgumentType::Enum && arg.options.is_none() {
                 return Err(WorkflowError::ValidationError(
@@ -209,38 +276,103 @@ impl Workflow {
             }
         }
 
-        // Check for unused placeholders in command
-        let placeholders = self.extract_placeholders();
-        for placeholder in placeholders {
-            if !self.arguments.iter().any(|arg| arg.name == placeholder) {
-                return Err(WorkflowError::ValidationError(
-                    format!("Placeholder '{}' has no corresponding argument", placeholder)
-                ));
+        // Validate steps
+        for step in &self.steps {
+            if step.id.trim().is_empty() {
+                return Err(WorkflowError::ValidationError(format!("Step '{}' is missing an ID", step.name)));
+            }
+            if step.name.trim().is_empty() {
+                return Err(WorkflowError::ValidationError(format!("Step with ID '{}' is missing a name", step.id)));
+            }
+
+            match &step.step_type {
+                WorkflowStepType::Command { command, .. } => {
+                    if command.trim().is_empty() {
+                        return Err(WorkflowError::ValidationError(format!("Command step '{}' has an empty command", step.name)));
+                    }
+                },
+                WorkflowStepType::AgentPrompt { message, .. } => {
+                    if message.trim().is_empty() {
+                        return Err(WorkflowError::ValidationError(format!("AgentPrompt step '{}' has an empty message", step.name)));
+                    }
+                },
+                WorkflowStepType::ToolCall { tool_name, arguments } => {
+                    if tool_name.trim().is_empty() {
+                        return Err(WorkflowError::ValidationError(format!("ToolCall step '{}' has an empty tool_name", step.name)));
+                    }
+                    if !arguments.is_object() {
+                        return Err(WorkflowError::ValidationError(format!("ToolCall step '{}' arguments must be a JSON object", step.name)));
+                    }
+                },
+                WorkflowStepType::SubWorkflow { workflow_name, .. } => {
+                    if workflow_name.trim().is_empty() {
+                        return Err(WorkflowError::ValidationError(format!("SubWorkflow step '{}' has an empty workflow_name", step.name)));
+                    }
+                },
+                WorkflowStepType::PluginAction { plugin_name, action_name, arguments } => {
+                    if plugin_name.trim().is_empty() {
+                        return Err(WorkflowError::ValidationError(format!("PluginAction step '{}' has an empty plugin_name", step.name)));
+                    }
+                    if action_name.trim().is_empty() {
+                        return Err(WorkflowError::ValidationError(format!("PluginAction step '{}' has an empty action_name", step.name)));
+                    }
+                    if !arguments.is_object() {
+                        return Err(WorkflowError::ValidationError(format!("PluginAction step '{}' arguments must be a JSON object", step.name)));
+                    }
+                },
             }
         }
 
         Ok(())
     }
 
-    /// Extract all placeholders from the command
+    /// Extract all placeholders from the command (now also from step commands)
     pub fn extract_placeholders(&self) -> Vec<String> {
         let mut placeholders = Vec::new();
-        let mut chars = self.command.chars().peekable();
         
-        while let Some(ch) = chars.next() {
-            if ch == '{' && chars.peek() == Some(&'{') {
-                chars.next(); // consume second '{'
-                let mut placeholder = String::new();
-                
+        // Check workflow arguments for placeholders in default values
+        for arg in &self.arguments {
+            if let Some(default_value) = &arg.default_value {
+                let mut chars = default_value.chars().peekable();
                 while let Some(ch) = chars.next() {
-                    if ch == '}' && chars.peek() == Some(&'}') {
-                        chars.next(); // consume second '}'
-                        if !placeholder.is_empty() {
-                            placeholders.push(placeholder);
+                    if ch == '{' && chars.peek() == Some(&'{') {
+                        chars.next(); // consume second '{'
+                        let mut placeholder = String::new();
+                        while let Some(ch) = chars.next() {
+                            if ch == '}' && chars.peek() == Some(&'}') {
+                                chars.next(); // consume second '}'
+                                if !placeholder.is_empty() {
+                                    placeholders.push(placeholder);
+                                }
+                                break;
+                            } else {
+                                placeholder.push(ch);
+                            }
                         }
-                        break;
-                    } else {
-                        placeholder.push(ch);
+                    }
+                }
+            }
+        }
+
+        // Check command steps for placeholders
+        for step in &self.steps {
+            if let WorkflowStepType::Command { command, .. } = &step.step_type {
+                let mut chars = command.chars().peekable();
+                while let Some(ch) = chars.next() {
+                    if ch == '{' && chars.peek() == Some(&'{') {
+                        chars.next(); // consume second '{'
+                        let mut placeholder = String::new();
+                        while let Some(ch) = chars.next() {
+                            if ch == '}' && chars.peek() == Some(&'}') {
+                                chars.next(); // consume second '}'
+                                if !placeholder.is_empty() {
+                                    placeholders.push(placeholder);
+                                }
+                                break;
+                            } else {
+                                placeholder.push(ch);
+                            }
+                        }
                     }
                 }
             }
@@ -302,9 +434,13 @@ impl Workflow {
             }
         }
 
-        // Command match (lower weight)
-        if self.command.to_lowercase().contains(&query_lower) {
-            score += 3.0;
+        // Command match (lower weight) - now check within steps
+        for step in &self.steps {
+            if let WorkflowStepType::Command { command, .. } = &step.step_type {
+                if command.to_lowercase().contains(&query_lower) {
+                    score += 3.0;
+                }
+            }
         }
 
         // Author match (low weight)

@@ -2,65 +2,46 @@ use crate::ai::context::AIContext;
 use crate::ai::providers::ChatMessage;
 use std::collections::HashMap; // Import HashMap
 
-pub struct PromptBuilder;
+pub struct PromptBuilder {
+    // Add any internal state if needed for prompt building
+}
 
 impl PromptBuilder {
     pub fn new() -> Self {
-        Self
+        Self {}
     }
 
     pub fn build_suggestion_prompt(&self, context: &AIContext) -> ChatMessage {
-        let mut prompt = String::from("You are an intelligent terminal assistant providing helpful suggestions. Based on the user's current context, suggest relevant commands, files, or actions.
-
-");
-        prompt.push_str(&format!("Current Working Directory: {}
-", context.cwd));
-        if let Some(env) = &context.env_vars {
-            prompt.push_str(&format!("Environment Variables: {:?}
-", env));
-        }
-        if !context.recent_commands.is_empty() {
-            prompt.push_str(&format!("Recent Commands: {:?}
-", context.recent_commands));
-        }
-        if let Some(selected_text) = &context.selected_text {
-            prompt.push_str(&format!("Selected Text: {}
-", selected_text));
-        }
-        prompt.push_str("Provide concise and actionable suggestions.");
-
+        let context_str = context.to_string();
         ChatMessage {
             role: "system".to_string(),
-            content: Some(prompt),
+            content: Some(format!(
+                "You are a helpful terminal assistant. Based on the current context, suggest the most relevant next command or action.
+Current context:
+{}
+Your response should be a single, concise command or a short suggestion.",
+                context_str
+            )),
             tool_calls: None,
             tool_call_id: None,
         }
     }
 
-    pub fn build_fix_prompt(&self, context: &AIContext, command_snippet: &str, error_message: &str) -> ChatMessage {
-        let mut prompt = String::from("You are an expert terminal assistant. Your task is to analyze a failed shell command and its error message, then provide the corrected shell command.
-Provide ONLY the corrected shell command. Do not include any explanations, markdown formatting, or extra text. Just the command.
-
-");
-        prompt.push_str(&format!("Current Working Directory: {}
-", context.cwd));
-        if let Some(env) = &context.env_vars {
-            prompt.push_str(&format!("Environment Variables: {:?}
-", env));
-        }
-        if !context.recent_commands.is_empty() {
-            prompt.push_str(&format!("Recent Commands: {:?}
-", context.recent_commands));
-        }
-        prompt.push_str(&format!("Failed Command: {}
-", command_snippet));
-        prompt.push_str(&format!("Error Message: {}
-", error_message));
-        prompt.push_str("Provide ONLY the corrected shell command.");
-
+    pub fn build_fix_prompt(&self, context: &AIContext, code_snippet: &str, error_message: &str) -> ChatMessage {
+        let context_str = context.to_string();
         ChatMessage {
             role: "system".to_string(),
-            content: Some(prompt),
+            content: Some(format!(
+                "You are an expert debugger and terminal command fixer. Analyze the provided failed command and error message, and suggest a corrected command.
+Current context:
+{}
+Failed command:
+{}
+Error message:
+{}
+Provide ONLY the corrected command.",
+                context_str, code_snippet, error_message
+            )),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -155,9 +136,9 @@ Provide ONLY the shell command. Do not include any explanations, markdown format
         }
         prompt.push_str(&format!("Command: `{}`
 ", command_input));
-        prompt.push_str(&format!("Output:\n```\n{}\n```\n", output));
+        prompt.push_str(&format!("Output:\n\`\`\`\n{}\n\`\`\`\n", output));
         if let Some(error) = error_message {
-            prompt.push_str(&format!("Error Message:\n```\n{}\n```\n", error));
+            prompt.push_str(&format!("Error Message:\n\`\`\`\n{}\n\`\`\`\n", error));
         }
         prompt.push_str("Explain the output and/or error message in natural language.");
 

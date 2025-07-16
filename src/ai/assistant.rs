@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use serde_json::Value;
+use crate::workflows::Workflow; // Import Workflow struct
 
 pub struct Assistant {
     provider: Box<dyn AIProvider + Send + Sync>,
@@ -102,7 +103,6 @@ impl Assistant {
         self.provider.stream_chat_completion(messages, None).await
     }
 
-    // New method for command generation
     pub async fn generate_command(&mut self, natural_language_query: &str) -> Result<String> {
         self.context.update_current_state().await?;
         let system_prompt = self.prompt_builder.build_command_generation_prompt(&self.context);
@@ -133,6 +133,30 @@ impl Assistant {
         let messages = vec![system_prompt, user_message];
         let response = self.provider.chat_completion(messages, None).await?;
         Ok(response.content.unwrap_or_default())
+    }
+
+    /// Infers a multi-step workflow from a natural language request.
+    pub async fn infer_workflow(&mut self, user_request: &str) -> Result<Workflow> {
+        self.context.update_current_state().await?;
+        let system_prompt = self.prompt_builder.build_workflow_inference_prompt(&self.context, user_request);
+        let user_message = ChatMessage {
+            role: "user".to_string(),
+            content: Some(user_request.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        let messages = vec![system_prompt, user_message];
+        let response = self.provider.chat_completion(messages, None).await?;
+        
+        let yaml_content = response.content.unwrap_or_default();
+        log::debug!("AI inferred workflow YAML:\n{}", yaml_content);
+
+        // Attempt to parse the YAML content into a Workflow struct
+        let workflow = Workflow::from_yaml(&yaml_content)
+            .map_err(|e| anyhow!("Failed to parse AI-inferred workflow YAML: {}", e))?;
+        
+        Ok(workflow)
     }
 
     pub fn get_history(&self) -> &Vec<ChatMessage> {

@@ -98,9 +98,10 @@ use syntax_tree::SyntaxTreeManager;
 use virtual_fs::VirtualFileSystem;
 use watcher::{Watcher, WatcherEvent};
 use websocket::WebSocketServer;
-use workflows::executor::WorkflowExecutor;
+use workflows::executor::{WorkflowExecutor, WorkflowExecutionEvent}; // Import WorkflowExecutionEvent
 use workflows::manager::WorkflowManager;
 use collaboration::session_sharing::CollaborationEvent; // Import CollaborationEvent
+use workflows::Workflow; // Import Workflow
 
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
@@ -120,6 +121,10 @@ pub struct NeoTerm {
    // Channels for PTY communication
    pty_tx: mpsc::Sender<PtyMessage>,
    pty_rx: mpsc::Receiver<PtyMessage>,
+
+   // Workflow execution
+   workflow_executor: Arc<WorkflowExecutor>,
+   workflow_event_rx: mpsc::Receiver<WorkflowExecutionEvent>,
 }
 
 /// Main application state.
@@ -191,6 +196,10 @@ pub enum Message {
    // Performance Benchmarks
    RunBenchmarks,
    BenchmarkResults(BenchmarkSuite), // New message for benchmark results
+
+   // Workflow messages
+   WorkflowExecutionEvent(WorkflowExecutionEvent), // Events from workflow executor
+   UserResponseToAgentPrompt(String, String), // prompt_id, user_response
 }
 
 /// Messages that can be sent to the main application loop.
@@ -220,6 +229,10 @@ pub enum BlockMessage {
     SendToAI, // New: Send this block's content to AI as context
     SuggestFix, // New: Ask AI to suggest a fix for this block's command
     ExplainOutput, // New: Ask AI to explain the output/error of this block
+    AcceptWorkflow, // New: Accept and run a suggested workflow
+    RejectWorkflow, // New: Reject a suggested workflow
+    AgentPromptInputChanged(String), // New: User typing in agent prompt input
+    SubmitAgentPrompt, // New: User submits response to agent prompt
 }
 
 #[derive(Debug, Clone)]
@@ -261,7 +274,16 @@ impl Application for NeoTerm {
             }
             cfg
         };
-        let agent_mode = Arc::new(RwLock::new(AgentMode::new(agent_config).unwrap()));
+
+        // Initialize AI Assistant first
+        let ai_assistant = Arc::new(RwLock::new(Assistant::new(
+            &agent_config.provider_type,
+            agent_config.api_key.clone(),
+            agent_config.model.clone(),
+        ).unwrap()));
+
+        // Then initialize AgentMode with the assistant
+        let agent_mode = Arc::new(RwLock::new(AgentMode::new(agent_config, ai_assistant.clone()).unwrap()));
 
         // Start the API server
         let agent_mode_clone = agent_mode.clone();
@@ -270,6 +292,62 @@ impl Application for NeoTerm {
         });
 
         let (pty_tx, pty_rx) = mpsc::channel(100);
+
+        // Initialize WorkflowExecutor
+        let (workflow_event_tx, workflow_event_rx) = mpsc::channel(100);
+        let command_manager = Arc::new(CommandManager::new(mpsc::channel(100).0)); // Dummy sender for now
+        let virtual_file_system = Arc::new(VirtualFileSystem::new());
+        let resource_manager = Arc::new(ResourceManager::new());
+        let plugin_manager = Arc::new(PluginManager::new());
+        let shell_manager_clone = Arc::new(ShellManager::new());
+        let drive_manager = Arc::new(DriveManager::new(Default::default(), mpsc::channel(100).0));
+        let watcher = Arc::new(Watcher::new(mpsc::channel(100).0));
+        let websocket_server = Arc::new(WebSocketServer::new());
+        let lpc_engine = Arc::new(LpcEngine::new(mpsc::channel(100).0));
+        let mcq_manager = Arc::new(McqManager::new());
+        let natural_language_detector = Arc::new(NaturalLanguageDetector::new());
+        let syntax_tree_manager = Arc::new(SyntaxTreeManager::new());
+        let string_offset_manager = Arc::new(StringOffsetManager::new());
+        let sum_tree_manager = Arc::new(SumTreeManager::new());
+        let fuzzy_match_manager = Arc::new(FuzzyMatchManager::new());
+        let markdown_parser = Arc::new(MarkdownParser::new());
+        let language_manager = Arc::new(LanguageManager::new());
+        let config_manager_dummy = Arc::new(ConfigManager::new_dummy()); // Dummy for settings_manager
+        let settings_manager = Arc::new(SettingsManager::new(config_manager_dummy.clone()));
+        let collaboration_manager = Arc::new(SessionSharingManager::new(mpsc::channel(100).0));
+        let sync_manager = Arc::new(SyncManager::new(Default::default(), mpsc::channel(100).0));
+        let wasm_server = Arc::new(WasmServer::new());
+
+        let workflow_executor = Arc::new(WorkflowExecutor::new(
+            command_manager,
+            virtual_file_system,
+            agent_mode.clone(), // Pass the agent_mode
+            resource_manager,
+            plugin_manager,
+            shell_manager_clone,
+            drive_manager,
+            watcher,
+            websocket_server,
+            lpc_engine,
+            mcq_manager,
+            natural_language_detector,
+            syntax_tree_manager,
+            string_offset_manager,
+            sum_tree_manager,
+            fuzzy_match_manager,
+            markdown_parser,
+            language_manager,
+            settings_manager,
+            collaboration_manager,
+            sync_manager,
+            wasm_server,
+        ));
+        // Set the event sender for the executor
+        let workflow_executor_clone = workflow_executor.clone();
+        tokio::spawn(async move {
+            let mut executor_lock = workflow_executor_clone.clone(); // Clone for mutable access
+            executor_lock.set_event_sender(workflow_event_tx);
+        });
        
         (
             Self {
@@ -283,6 +361,8 @@ impl Application for NeoTerm {
                 settings_open: false,
                 pty_tx,
                 pty_rx,
+                workflow_executor,
+                workflow_event_rx,
             },
             Command::none(),
         )
@@ -461,6 +541,20 @@ impl Application for NeoTerm {
                         }
                         self.agent_streaming_rx = None; // Mark stream as ended
                     }
+                    AgentMessage::WorkflowSuggested(workflow) => {
+                        let block = Block::new_workflow_suggestion(workflow);
+                        self.blocks.push(block);
+                        self.agent_streaming_rx = None; // Workflow suggestion ends the current AI stream
+                    }
+                    AgentMessage::AgentPromptRequest { prompt_id, message } => {
+                        let block = Block::new_agent_prompt(prompt_id, message);
+                        self.blocks.push(block);
+                        self.agent_streaming_rx = None; // Agent is waiting for user input
+                    }
+                    AgentMessage::AgentPromptResponse { .. } => {
+                        // This message is handled internally by AgentMode, not displayed directly
+                        Command::none()
+                    }
                 }
                 Command::none()
             }
@@ -553,6 +647,66 @@ impl Application for NeoTerm {
                 self.blocks.push(block);
                 Command::none()
             }
+            Message::WorkflowExecutionEvent(event) => {
+                match event {
+                    WorkflowExecutionEvent::Started { workflow_id, name } => {
+                        let block = Block::new_info("Workflow Started".to_string(), format!("Workflow '{}' (ID: {}) started.", name, workflow_id));
+                        self.blocks.push(block);
+                    }
+                    WorkflowExecutionEvent::StepStarted { workflow_id, step_id, name } => {
+                        let block = Block::new_info("Workflow Step Started".to_string(), format!("Workflow '{}' (ID: {}), Step '{}' (ID: {}) started.", workflow_id, name, step_id));
+                        self.blocks.push(block);
+                    }
+                    WorkflowExecutionEvent::StepCompleted { workflow_id, step_id, name, output } => {
+                        let block = Block::new_info("Workflow Step Completed".to_string(), format!("Workflow '{}' (ID: {}), Step '{}' (ID: {}) completed. Output:\n{}", workflow_id, name, step_id, output));
+                        self.blocks.push(block);
+                    }
+                    WorkflowExecutionEvent::StepFailed { workflow_id, step_id, name, error } => {
+                        let block = Block::new_error(format!("Workflow '{}' (ID: {}), Step '{}' (ID: {}) failed: {}", workflow_id, name, step_id, error));
+                        self.blocks.push(block);
+                    }
+                    WorkflowExecutionEvent::Completed { workflow_id, name, success } => {
+                        let status = if success { "successfully" } else { "with errors" };
+                        let block = Block::new_info("Workflow Completed".to_string(), format!("Workflow '{}' (ID: {}) completed {}.", name, workflow_id, status));
+                        self.blocks.push(block);
+                    }
+                    WorkflowExecutionEvent::Error { workflow_id, message } => {
+                        let block = Block::new_error(format!("Workflow execution error for ID {}: {}", workflow_id, message));
+                        self.blocks.push(block);
+                    }
+                    WorkflowExecutionEvent::AgentPromptRequest { workflow_id, step_id, prompt_id, message } => {
+                        // Find the existing agent prompt block if it exists, or create a new one
+                        if let Some(block) = self.blocks.iter_mut().find(|b| {
+                            if let BlockContent::AgentPrompt { prompt_id: existing_prompt_id, .. } = &b.content {
+                                existing_prompt_id == &prompt_id
+                            } else {
+                                false
+                            }
+                        }) {
+                            if let BlockContent::AgentPrompt { message: ref mut msg, .. } = block.content {
+                                *msg = message; // Update message if needed
+                            }
+                        } else {
+                            let block = Block::new_agent_prompt(prompt_id, message);
+                            self.blocks.push(block);
+                        }
+                    }
+                }
+                Command::none()
+            }
+            Message::UserResponseToAgentPrompt(prompt_id, response) => {
+                let agent_mode_arc_clone = self.agent_mode.clone();
+                Command::perform(
+                    async move {
+                        let mut agent_mode = agent_mode_arc_clone.write().await;
+                        match agent_mode.handle_agent_prompt_response(prompt_id, response).await {
+                            Ok(_) => Message::Tick, // Just a dummy message to trigger update
+                            Err(e) => Message::AgentError(format!("Failed to send agent prompt response: {}", e)),
+                        }
+                    },
+                    |msg| msg
+                )
+            }
         }
     }
 
@@ -616,6 +770,7 @@ impl Application for NeoTerm {
             self.pty_manager_subscription(),
             keyboard::Event::all().map(Message::KeyboardEvent),
             agent_stream_sub,
+            self.workflow_executor_subscription(), // New subscription for workflow events
         ])
     }
 }
@@ -708,7 +863,8 @@ impl NeoTerm {
     }
 
     fn handle_block_action(&mut self, block_id: String, action: BlockMessage) -> Command<Message> {
-        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
+        if let Some(block_index) = self.blocks.iter().position(|b| b.id == block_id) {
+            let block = &mut self.blocks[block_index];
             match action {
                 BlockMessage::Rerun => {
                     if let BlockContent::Command { input, .. } = &block.content {
@@ -749,6 +905,12 @@ impl NeoTerm {
                         },
                         BlockContent::Error { message, .. } => {
                             format!("Error: {}", message)
+                        },
+                        BlockContent::WorkflowSuggestion { workflow } => {
+                            format!("Workflow Suggestion: {}\nDescription: {}\nSteps: {:#?}", workflow.name, workflow.description.as_deref().unwrap_or(""), workflow.steps)
+                        },
+                        BlockContent::AgentPrompt { message, .. } => {
+                            format!("Agent Prompt: {}", message)
                         },
                     });
                     self.handle_ai_command(prompt, Some(block_id.clone()))
@@ -819,6 +981,65 @@ impl NeoTerm {
                         },
                         |msg| msg
                     );
+                }
+                BlockMessage::AcceptWorkflow => {
+                    if let BlockContent::WorkflowSuggestion { workflow } = &block.content {
+                        let workflow_to_execute = workflow.clone();
+                        let workflow_executor_clone = self.workflow_executor.clone();
+                        let workflow_manager_clone = self.workflow_manager.clone();
+                        let block_id_clone = block_id.clone();
+
+                        // Remove the suggestion block from UI
+                        self.blocks.retain(|b| b.id != block_id_clone);
+
+                        return Command::perform(
+                            async move {
+                                // Optionally save the workflow as a macro
+                                let save_result = workflow_manager_clone.save_workflow(workflow_to_execute.clone()).await;
+                                if let Err(e) = save_result {
+                                    log::error!("Failed to save AI-generated workflow: {}", e);
+                                    // Send an error message to the UI
+                                    return Message::AgentError(format!("Failed to save workflow: {}", e));
+                                }
+
+                                // Execute the workflow
+                                match workflow_executor_clone.execute_workflow(workflow_to_execute, Vec::new()).await {
+                                    Ok(_) => Message::Tick, // Workflow execution events will be handled by subscription
+                                    Err(e) => Message::AgentError(format!("Failed to execute workflow: {}", e)),
+                                }
+                            },
+                            |msg| msg
+                        );
+                    }
+                    Command::none()
+                }
+                BlockMessage::RejectWorkflow => {
+                    // Simply remove the workflow suggestion block
+                    self.blocks.retain(|b| b.id != block_id);
+                    Command::none()
+                }
+                BlockMessage::AgentPromptInputChanged(new_value) => {
+                    if let BlockContent::AgentPrompt { input_value: ref mut current_value, .. } = &mut block.content {
+                        *current_value = new_value;
+                    }
+                    Command::none()
+                }
+                BlockMessage::SubmitAgentPrompt => {
+                    if let BlockContent::AgentPrompt { prompt_id, input_value, .. } = &block.content {
+                        let prompt_id_clone = prompt_id.clone();
+                        let response_clone = input_value.clone();
+                        
+                        // Remove the prompt block from UI
+                        self.blocks.retain(|b| b.id != block_id);
+
+                        return Command::perform(
+                            async move {
+                                Message::UserResponseToAgentPrompt(prompt_id_clone, response_clone)
+                            },
+                            |msg| msg
+                        );
+                    }
+                    Command::none()
                 }
             }
         } else {
@@ -912,6 +1133,17 @@ impl NeoTerm {
             |mut receiver| async move {
                 let msg = receiver.recv().await.unwrap();
                 (Message::PtyOutput(msg), receiver)
+            },
+        )
+    }
+
+    fn workflow_executor_subscription(&self) -> iced::Subscription<Message> {
+        iced::Subscription::unfold(
+            "workflow_executor_events",
+            self.workflow_event_rx.clone(),
+            |mut receiver| async move {
+                let msg = receiver.recv().await.unwrap();
+                (Message::WorkflowExecutionEvent(msg), receiver)
             },
         )
     }
@@ -1514,7 +1746,7 @@ async fn main() -> Result<()> {
                 cli::WorkflowCommands::List => {
                     println!("Available Workflows:");
                     for workflow in workflow_manager.list_workflows().await {
-                        println!("- {} (Description: {})", workflow.name, workflow.description);
+                        println!("- {} (Description: {})", workflow.name, workflow.description.as_deref().unwrap_or("No description"));
                     }
                 }
                 cli::WorkflowCommands::Run { name, args } => {

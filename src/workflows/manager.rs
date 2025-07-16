@@ -6,39 +6,10 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 use crate::config::CONFIG_DIR;
+use super::Workflow; // Import Workflow from parent module
 
 // This module manages workflows: loading, saving, executing, and providing
 // a user interface for creating and editing workflows.
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Workflow {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub steps: Vec<WorkflowStep>,
-    pub environment: HashMap<String, String>,
-    pub timeout: Option<u64>, // Timeout for the entire workflow
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowStep {
-    pub id: String,
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub working_directory: Option<String>,
-    pub environment: HashMap<String, String>,
-    pub timeout: Option<u64>, // Timeout for the step
-    pub retry_count: u32,
-    pub condition: Option<String>, // Conditional execution (e.g., "status == 0")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WorkflowOutputFormat {
-    PlainText,
-    Json,
-    Regex { pattern: String },
-}
 
 pub struct WorkflowManager {
     workflows: HashMap<String, Workflow>,
@@ -54,42 +25,52 @@ impl WorkflowManager {
         }
     }
 
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(&mut self) -> Result<()> { // Changed to mutable self
         log::info!("Workflow manager initialized. Workflow directory: {:?}", self.workflow_dir);
         fs::create_dir_all(&self.workflow_dir).await?;
         self.load_default_workflows().await?;
+        self.load_user_workflows().await?; // Load any user-defined workflows
         Ok(())
     }
 
-    async fn load_default_workflows(&self) -> Result<()> {
-        let mut workflows = self.workflows.clone(); // Clone to modify
-
+    async fn load_default_workflows(&mut self) -> Result<()> { // Changed to mutable self
         // Simulate loading some default workflows from YAML files
-        let wf1_path = self.workflow_dir.join("git-status.yaml");
-        if !wf1_path.exists() {
-            fs::write(&wf1_path, include_str!("../../workflows/git-status.yaml")).await?;
-        }
-        let wf1_contents = fs::read_to_string(&wf1_path).await?;
-        let wf1: Workflow = serde_yaml::from_str(&wf1_contents)?;
-        workflows.insert(wf1.name.clone(), wf1);
+        let defaults = vec![
+            ("git-status.yaml", include_str!("../../workflows/git-status.yaml")),
+            ("docker-cleanup.yaml", include_str!("../../workflows/docker-cleanup.yaml")),
+            ("find-large-files.yaml", include_str!("../../workflows/find-large-files.yaml")),
+        ];
 
-        let wf2_path = self.workflow_dir.join("docker-cleanup.yaml");
-        if !wf2_path.exists() {
-            fs::write(&wf2_path, include_str!("../../workflows/docker-cleanup.yaml")).await?;
+        for (filename, content) in defaults {
+            let wf_path = self.workflow_dir.join(filename);
+            if !wf_path.exists() {
+                fs::write(&wf_path, content).await?;
+            }
+            let wf_contents = fs::read_to_string(&wf_path).await?;
+            let wf: Workflow = serde_yaml::from_str(&wf_contents)?;
+            self.workflows.insert(wf.name.clone(), wf);
         }
-        let wf2_contents = fs::read_to_string(&wf2_path).await?;
-        let wf2: Workflow = serde_yaml::from_str(&wf2_contents)?;
-        workflows.insert(wf2.name.clone(), wf2);
+        log::info!("Loaded {} default workflows.", self.workflows.len());
+        Ok(())
+    }
 
-        let wf3_path = self.workflow_dir.join("find-large-files.yaml");
-        if !wf3_path.exists() {
-            fs::write(&wf3_path, include_str!("../../workflows/find-large-files.yaml")).await?;
+    async fn load_user_workflows(&mut self) -> Result<()> {
+        let mut entries = fs::read_dir(&self.workflow_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "yaml") {
+                let content = fs::read_to_string(&path).await?;
+                match Workflow::from_yaml(&content) {
+                    Ok(wf) => {
+                        self.workflows.insert(wf.name.clone(), wf);
+                    },
+                    Err(e) => {
+                        log::error!("Failed to load workflow from {:?}: {}", path, e);
+                    }
+                }
+            }
         }
-        let wf3_contents = fs::read_to_string(&wf3_path).await?;
-        let wf3: Workflow = serde_yaml::from_str(&wf3_contents)?;
-        workflows.insert(wf3.name.clone(), wf3);
-
-        log::info!("Loaded {} default workflows.", workflows.len());
+        log::info!("Loaded {} user workflows.", self.workflows.len());
         Ok(())
     }
 
@@ -130,10 +111,19 @@ impl WorkflowManager {
                 let default_workflow = Workflow {
                     id: Uuid::new_v4().to_string(),
                     name: "Imported Workflow".to_string(),
-                    description: "A basic imported workflow".to_string(),
+                    description: Some("A basic imported workflow".to_string()),
                     steps: vec![],
                     environment: HashMap::new(),
                     timeout: None,
+                    tags: Vec::new(),
+                    source_url: None,
+                    author: None,
+                    author_url: None,
+                    shells: None,
+                    arguments: Vec::new(),
+                    file_path: None,
+                    last_used: None,
+                    usage_count: 0,
                 };
                 serde_yaml::to_string(&default_workflow)?
             }
