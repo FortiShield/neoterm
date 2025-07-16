@@ -12,6 +12,8 @@ use ratatui::Frame;
 use crate::workflows::Workflow; // Import Workflow
 
 /// Represents a generic UI block in the terminal.
+/// This `BlockType` is primarily for the historical Ratatui (TUI) implementation
+/// and `Block` struct below is used for the current Iced GUI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockType {
     Terminal,
@@ -25,6 +27,8 @@ pub enum BlockType {
 }
 
 /// State for a UI block.
+/// This `BlockState` is primarily for the historical Ratatui (TUI) implementation
+/// and `Block` struct below is used for the current Iced GUI.
 #[derive(Debug, Clone)]
 pub struct BlockState {
     pub block_type: BlockType,
@@ -74,6 +78,8 @@ impl BlockState {
 }
 
 /// Manages multiple UI blocks.
+/// This `BlockManager` is primarily for the historical Ratatui (TUI) implementation
+/// and `NeoTerm` in `src/main.rs` directly manages `Block`s for the current Iced GUI.
 #[derive(Debug, Clone)]
 pub struct BlockManager {
     pub blocks: Vec<BlockState>,
@@ -154,6 +160,7 @@ impl BlockManager {
     }
 }
 
+/// Represents the content type of a UI block in the Iced GUI.
 #[derive(Debug, Clone)]
 pub enum BlockContent {
     Command {
@@ -189,6 +196,7 @@ pub enum BlockContent {
     // Add other block types as needed (e.g., Code, Image, Workflow)
 }
 
+/// Represents a UI block in the Iced GUI.
 #[derive(Debug, Clone)]
 pub struct Block {
     pub id: String,

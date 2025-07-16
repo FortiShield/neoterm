@@ -19,8 +19,7 @@ use ratatui::{
     backend::CrosstermBackend,
     Terminal,
 };
-use std::{io, sync::Arc, time::Duration};
-use tokio::sync::{mpsc, Mutex};
+use std::{io, time::Duration};
 use tokio::time::sleep;
 use ratatui::text::{Line, Span, Style};
 
@@ -1113,7 +1112,7 @@ impl NeoTerm {
                                 let _ = pty_tx.send(PtyMessage::OutputChunk {
                                     block_id: block_id.clone(),
                                     content: output.stderr,
-                                    is_stdout: false,
+                                    is_stderr: false,
                                 }).await;
                             }
                         }
