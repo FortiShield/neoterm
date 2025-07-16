@@ -120,6 +120,21 @@ impl Assistant {
         Ok(response.content.unwrap_or_default().trim().to_string()) // Trim to remove any leading/trailing whitespace
     }
 
+    pub async fn explain_output(&mut self, command_input: &str, output: &str, error_message: Option<&str>) -> Result<String> {
+        self.context.update_current_state().await?;
+        let system_prompt = self.prompt_builder.build_explain_output_prompt(&self.context, command_input, output, error_message);
+        let user_message = ChatMessage {
+            role: "user".to_string(),
+            content: Some("Please explain the above command's output/error.".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        let messages = vec![system_prompt, user_message];
+        let response = self.provider.chat_completion(messages, None).await?;
+        Ok(response.content.unwrap_or_default())
+    }
+
     pub fn get_history(&self) -> &Vec<ChatMessage> {
         &self.conversation_history
     }

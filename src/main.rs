@@ -219,6 +219,7 @@ pub enum BlockMessage {
     ToggleCollapse,
     SendToAI, // New: Send this block's content to AI as context
     SuggestFix, // New: Ask AI to suggest a fix for this block's command
+    ExplainOutput, // New: Ask AI to explain the output/error of this block
 }
 
 #[derive(Debug, Clone)]
@@ -738,7 +739,7 @@ impl NeoTerm {
                     let block_to_send = block.clone();
                     let prompt = format!("Please analyze the following block:\n{}", match &block_to_send.content {
                         BlockContent::Command { input, output, status, error, .. } => {
-                            format!("Command: `{}`\nOutput:\n\`\`\`\n{}\n\`\`\`\nStatus: {}\nError: {}", input, output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n"), status, error)
+                            format!("Command: `{}`\nOutput:\n```\n{}\n```\nStatus: {}\nError: {}", input, output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n"), status, error)
                         },
                         BlockContent::AgentMessage { content, is_user, .. } => {
                             format!("{}: {}", if *is_user { "User" } else { "Agent" }, content)
@@ -783,6 +784,41 @@ impl NeoTerm {
                         );
                     }
                     Command::none()
+                }
+                BlockMessage::ExplainOutput => {
+                    let agent_mode_arc_clone = self.agent_mode.clone();
+                    let (command_input, output_content, error_message) = match &block.content {
+                        BlockContent::Command { input, output, error, .. } => {
+                            let full_output = output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n");
+                            let stderr_output = output.iter().filter(|(_, is_stdout)| !is_stdout).map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n");
+                            let err_msg = if *error && !stderr_output.is_empty() {
+                                Some(stderr_output)
+                            } else if *error {
+                                Some("Command failed with non-zero exit code.".to_string())
+                            } else {
+                                None
+                            };
+                            (input.clone(), full_output, err_msg)
+                        },
+                        BlockContent::Error { message, .. } => {
+                            ("".to_string(), "".to_string(), Some(message.clone()))
+                        },
+                        _ => {
+                            // This action should only be available for Command and Error blocks
+                            return Command::none();
+                        }
+                    };
+
+                    return Command::perform(
+                        async move {
+                            let mut agent_mode = agent_mode_arc_clone.write().await;
+                            match agent_mode.explain_output(&command_input, &output_content, error_message.as_deref()).await {
+                                Ok(explanation) => Message::AgentStream(AgentMessage::SystemMessage(explanation)),
+                                Err(e) => Message::AgentError(format!("Failed to get explanation: {}", e)),
+                            }
+                        },
+                        |msg| msg
+                    );
                 }
             }
         } else {

@@ -138,4 +138,34 @@ Provide ONLY the shell command. Do not include any explanations, markdown format
             tool_call_id: None,
         }
     }
+
+    pub fn build_explain_output_prompt(&self, context: &AIContext, command_input: &str, output: &str, error_message: Option<&str>) -> ChatMessage {
+        let mut prompt = String::from("You are an expert terminal output and error explainer. Your task is to provide a clear, concise, and easy-to-understand explanation of a given shell command's output or error message. Focus on what happened, why it happened (if an error), and what it means.
+
+");
+        prompt.push_str(&format!("Current Working Directory: {}
+", context.cwd));
+        if let Some(env) = &context.env_vars {
+            prompt.push_str(&format!("Environment Variables: {:?}
+", env));
+        }
+        if !context.recent_commands.is_empty() {
+            prompt.push_str(&format!("Recent Commands: {:?}
+", context.recent_commands));
+        }
+        prompt.push_str(&format!("Command: `{}`
+", command_input));
+        prompt.push_str(&format!("Output:\n```\n{}\n```\n", output));
+        if let Some(error) = error_message {
+            prompt.push_str(&format!("Error Message:\n```\n{}\n```\n", error));
+        }
+        prompt.push_str("Explain the output and/or error message in natural language.");
+
+        ChatMessage {
+            role: "system".to_string(),
+            content: Some(prompt),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
 }

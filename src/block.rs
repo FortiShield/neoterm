@@ -297,24 +297,34 @@ impl Block {
             .on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::ToggleCollapse))
             .style(iced::widget::button::text::Style::Text);
 
-        let header = row![
+        let mut actions_row = row![
             toggle_button,
             id_text,
-            // Add other block actions here (copy, rerun, delete, export)
             button(text("📋")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Copy)).style(iced::widget::button::text::Style::Text),
             button(text("🔄")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Rerun)).style(iced::widget::button::text::Style::Text),
             button(text("🗑️")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Delete)).style(iced::widget::button::text::Style::Text),
             button(text("📤")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::Export)).style(iced::widget::button::text::Style::Text),
-            button(text("🤖")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SendToAI)).style(iced::widget::button::text::Style::Text), // New: Send to AI
-            // Conditionally show "Fix" button for failed command blocks
-            if let BlockContent::Command { error: true, .. } = self.content {
-                button(text("🛠️ Fix")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SuggestFix)).style(iced::widget::button::text::Style::Text).into()
-            } else {
-                iced::widget::Space::new(Length::Fixed(0.0), Length::Fixed(0.0)).into() // Empty space if not applicable
+            button(text("🤖")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SendToAI)).style(iced::widget::button::text::Style::Text),
+        ];
+
+        // Conditionally show "Fix" button for failed command blocks
+        if let BlockContent::Command { error: true, .. } = self.content {
+            actions_row = actions_row.push(
+                button(text("🛠️ Fix")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::SuggestFix)).style(iced::widget::button::text::Style::Text)
+            );
+        }
+
+        // Conditionally show "Explain Output" button for command and error blocks
+        match self.content {
+            BlockContent::Command { .. } | BlockContent::Error { .. } => {
+                actions_row = actions_row.push(
+                    button(text("❓ Explain")).on_press(crate::Message::BlockAction(self.id.clone(), crate::main::BlockMessage::ExplainOutput)).style(iced::widget::button::text::Style::Text)
+                );
             }
-        ]
-        .spacing(5)
-        .align_items(alignment::Horizontal::Center);
+            _ => {}
+        }
+
+        let header = actions_row.spacing(5).align_items(alignment::Horizontal::Center);
 
         let content_view: Element<crate::Message> = if self.collapsed {
             match &self.content {
