@@ -1,55 +1,64 @@
 use super::{AIProvider, ChatMessage, ToolCall, ToolFunction};
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use anyhow::{Result, anyhow};
 use reqwest::Client;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use futures_util::StreamExt;
-use bytes::BytesMut;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
+#[derive(Debug, Clone)]
 pub struct OllamaProvider {
-    client: Client,
     model: String,
+    client: Client,
     base_url: String,
 }
 
 impl OllamaProvider {
     pub fn new(model: String) -> Result<Self> {
         Ok(Self {
-            client: Client::new(),
             model,
-            base_url: "http://localhost:11434".to_string(), // Default Ollama URL
+            client: Client::new(),
+            base_url: "http://localhost:11434/api".to_string(), // Default Ollama local URL
         })
     }
 }
 
 #[async_trait]
 impl AIProvider for OllamaProvider {
+    fn name(&self) -> &str {
+        "Ollama"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     async fn chat_completion(&self, messages: Vec<ChatMessage>, _tools: Option<Value>) -> Result<ChatMessage> {
-        // Ollama's /api/chat endpoint supports messages directly
-        let body = serde_json::json!({
+        // Ollama's /api/chat endpoint
+        let request_body = json!({
             "model": self.model,
             "messages": messages,
             "stream": false,
         });
 
-        let response = self.client
-            .post(&format!("{}/api/chat", self.base_url))
-            .json(&body)
+        let response = self.client.post(format!("{}/chat", self.base_url))
+            .json(&request_body)
             .send()
             .await?
-            .error_for_status()?;
+            .json::<Value>()
+            .await?;
 
-        let json_response: Value = response.json().await?;
+        log::debug!("Ollama chat_completion response: {:?}", response);
 
-        let message = json_response["message"].clone();
+        let message = response["message"].clone();
+        let content = message["content"].as_str().map(|s| s.to_string());
         let role = message["role"].as_str().unwrap_or("assistant").to_string();
-        let content = message["content"].as_str().unwrap_or("").to_string();
 
         Ok(ChatMessage {
             role,
             content,
-            tool_calls: None, // Ollama's native tool calling is not as standardized yet
+            tool_calls: None, // Ollama currently has limited tool call support
             tool_call_id: None,
         })
     }
@@ -57,82 +66,72 @@ impl AIProvider for OllamaProvider {
     async fn stream_chat_completion(&self, messages: Vec<ChatMessage>, _tools: Option<Value>) -> Result<mpsc::Receiver<ChatMessage>> {
         let (tx, rx) = mpsc::channel(100);
 
-        let body = serde_json::json!({
+        let request_body = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
         });
 
-        let request_builder = self.client
-            .post(&format!("{}/api/chat", self.base_url))
-            .json(&body);
+        let request_builder = self.client.post(format!("{}/chat", self.base_url))
+            .json(&request_body);
 
         tokio::spawn(async move {
-            let response = match request_builder.send().await {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Failed to send stream request to Ollama: {:?}", e);
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                log::error!("Ollama stream request failed with status {}: {}", status, text);
-                return;
-            }
-
-            let mut stream = response.bytes_stream();
-            let mut buffer = BytesMut::new();
-
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        buffer.extend_from_slice(&chunk);
-                        while let Some(line) = extract_line(&mut buffer) {
-                            match serde_json::from_str::<Value>(&line) {
-                                Ok(json_chunk) => {
-                                    if let Some(message_obj) = json_chunk["message"].as_object() {
-                                        let role = message_obj["role"].as_str().unwrap_or_default().to_string();
-                                        let content = message_obj["content"].as_str().unwrap_or_default().to_string();
-                                        
-                                        let msg = ChatMessage {
-                                            role,
-                                            content,
-                                            tool_calls: None,
-                                            tool_call_id: None,
-                                        };
-                                        if tx.send(msg).await.is_err() {
-                                            log::warn!("Receiver dropped, stopping Ollama stream.");
-                                            return;
-                                        }
+            match request_builder.send().await {
+                Ok(response) => {
+                    let mut stream = response.bytes_stream();
+                    while let Some(chunk_result) = stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                let chunk_str = String::from_utf8_lossy(&chunk);
+                                for line in chunk_str.lines() {
+                                    match serde_json::from_str::<Value>(line) {
+                                        Ok(event) => {
+                                            if let Some(message_delta) = event["message"].as_object() {
+                                                if let Some(content_chunk) = message_delta["content"].as_str() {
+                                                    if tx.send(ChatMessage {
+                                                        role: "assistant".to_string(),
+                                                        content: Some(content_chunk.to_string()),
+                                                        tool_calls: None,
+                                                        tool_call_id: None,
+                                                    }).await.is_err() {
+                                                        log::warn!("Receiver dropped, stopping Ollama stream.");
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            if event["done"].as_bool().unwrap_or(false) {
+                                                break; // Stream finished
+                                            }
+                                        },
+                                        Err(e) => log::error!("Failed to parse Ollama stream event: {:?} - {}", line, e),
                                     }
-                                    if json_chunk["done"].as_bool().unwrap_or(false) {
-                                        break; // Stream is done
-                                    }
-                                },
-                                Err(e) => log::error!("Failed to parse JSON chunk from Ollama: {:?} from data: {}", e, line),
+                                }
+                            },
+                            Err(e) => {
+                                log::error!("Error receiving chunk from Ollama stream: {:?}", e);
+                                let _ = tx.send(ChatMessage {
+                                    role: "error".to_string(),
+                                    content: Some(format!("Stream error: {}", e)),
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                }).await;
+                                break;
                             }
                         }
-                    },
-                    Err(e) => {
-                        log::error!("Error in Ollama stream: {:?}", e);
-                        break;
                     }
+                },
+                Err(e) => {
+                    log::error!("Failed to send request to Ollama: {:?}", e);
+                    let _ = tx.send(ChatMessage {
+                        role: "error".to_string(),
+                        content: Some(format!("Request error: {}", e)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    }).await;
                 }
             }
         });
 
         Ok(rx)
-    }
-}
-
-fn extract_line(buffer: &mut BytesMut) -> Option<String> {
-    if let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-        let line = buffer.split_to(newline_pos + 1);
-        String::from_utf8(line.to_vec()).ok().map(|s| s.trim().to_string())
-    } else {
-        None
     }
 }

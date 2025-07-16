@@ -11,7 +11,7 @@ pub struct Assistant {
     provider: Box<dyn AIProvider + Send + Sync>,
     prompt_builder: PromptBuilder,
     context: AIContext,
-    conversation_history: Vec<ChatMessage>,
+    pub conversation_history: Vec<ChatMessage>, // Made public for AgentMode to manage
 }
 
 impl Assistant {
@@ -36,7 +36,7 @@ impl Assistant {
         let system_prompt = self.prompt_builder.build_suggestion_prompt(&self.context);
         let user_message = ChatMessage {
             role: "user".to_string(),
-            content: user_query.to_string(),
+            content: Some(user_query.to_string()),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -47,7 +47,7 @@ impl Assistant {
 
         let response = self.provider.chat_completion(messages, None).await?;
         self.conversation_history.push(response.clone());
-        Ok(response.content)
+        Ok(response.content.unwrap_or_default())
     }
 
     pub async fn fix(&mut self, code_snippet: &str, error_message: &str) -> Result<String> {
@@ -55,7 +55,7 @@ impl Assistant {
         let system_prompt = self.prompt_builder.build_fix_prompt(&self.context, code_snippet, error_message);
         let user_message = ChatMessage {
             role: "user".to_string(),
-            content: format!("Please fix the following code:\n```\n{}\n```\nError: {}", code_snippet, error_message),
+            content: Some(format!("Please fix the following code:\n```\n{}\n```\nError: {}", code_snippet, error_message)),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -66,7 +66,7 @@ impl Assistant {
 
         let response = self.provider.chat_completion(messages, None).await?;
         self.conversation_history.push(response.clone());
-        Ok(response.content)
+        Ok(response.content.unwrap_or_default())
     }
 
     pub async fn explain(&mut self, text_to_explain: &str) -> Result<String> {
@@ -74,7 +74,7 @@ impl Assistant {
         let system_prompt = self.prompt_builder.build_explanation_prompt(&self.context);
         let user_message = ChatMessage {
             role: "user".to_string(),
-            content: format!("Explain the following:\n{}", text_to_explain),
+            content: Some(format!("Explain the following:\n{}", text_to_explain)),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -85,7 +85,7 @@ impl Assistant {
 
         let response = self.provider.chat_completion(messages, None).await?;
         self.conversation_history.push(response.clone());
-        Ok(response.content)
+        Ok(response.content.unwrap_or_default())
     }
 
     pub async fn stream_chat(&mut self, user_message: &str) -> Result<mpsc::Receiver<ChatMessage>> {
@@ -96,12 +96,30 @@ impl Assistant {
         messages.extend(self.conversation_history.clone());
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: user_message.to_string(),
+            content: Some(user_message.to_string()),
             tool_calls: None,
             tool_call_id: None,
         });
 
         self.provider.stream_chat_completion(messages, None).await
+    }
+
+    // New method for command generation
+    pub async fn generate_command(&mut self, natural_language_query: &str) -> Result<String> {
+        self.context.update_current_state().await?;
+        let system_prompt = self.prompt_builder.build_command_generation_prompt(&self.context);
+        let user_message = ChatMessage {
+            role: "user".to_string(),
+            content: Some(natural_language_query.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        let messages = vec![system_prompt, user_message]; // No history for command generation to keep it focused
+
+        let response = self.provider.chat_completion(messages, None).await?;
+        // Do NOT add to conversation history, as this is a specific command generation, not general chat.
+        Ok(response.content.unwrap_or_default().trim().to_string()) // Trim to remove any leading/trailing whitespace
     }
 
     pub fn get_history(&self) -> &Vec<ChatMessage> {

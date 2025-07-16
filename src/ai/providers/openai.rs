@@ -1,198 +1,203 @@
 use super::{AIProvider, ChatMessage, ToolCall, ToolFunction};
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use reqwest::Client;
-use serde_json::Value;
+use anyhow::{Result, anyhow};
+use reqwest::{Client, Error as ReqwestError};
 use tokio::sync::mpsc;
 use futures_util::StreamExt;
-use bytes::BytesMut;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
+#[derive(Debug, Clone)]
 pub struct OpenAIProvider {
-    client: Client,
     api_key: String,
     model: String,
-    base_url: String,
+    client: Client,
 }
 
 impl OpenAIProvider {
     pub fn new(api_key: Option<String>, model: String) -> Result<Self> {
         let api_key = api_key.ok_or_else(|| anyhow!("OpenAI API key not provided"))?;
         Ok(Self {
-            client: Client::new(),
             api_key,
             model,
-            base_url: "https://api.openai.com/v1".to_string(),
+            client: Client::new(),
         })
-    }
-
-    fn get_headers(&self) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.api_key).parse().unwrap(),
-        );
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
-        );
-        headers
     }
 }
 
 #[async_trait]
 impl AIProvider for OpenAIProvider {
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     async fn chat_completion(&self, messages: Vec<ChatMessage>, tools: Option<Value>) -> Result<ChatMessage> {
-        let mut body = serde_json::json!({
+        let mut request_body = json!({
             "model": self.model,
             "messages": messages,
         });
 
         if let Some(t) = tools {
-            body["tools"] = t;
-            body["tool_choice"] = serde_json::json!("auto");
+            request_body["tools"] = t;
         }
 
-        let response = self.client
-            .post(&format!("{}/chat/completions", self.base_url))
-            .headers(self.get_headers())
-            .json(&body)
+        let response = self.client.post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
             .send()
             .await?
-            .error_for_status()?;
+            .json::<Value>()
+            .await?;
 
-        let json_response: Value = response.json().await?;
-        
-        let choice = json_response["choices"][0].clone();
+        log::debug!("OpenAI chat_completion response: {:?}", response);
+
+        let choice = response["choices"][0].clone();
         let message = choice["message"].clone();
 
+        let content = message["content"].as_str().map(|s| s.to_string());
         let role = message["role"].as_str().unwrap_or("assistant").to_string();
-        let content = message["content"].as_str().unwrap_or("").to_string();
-        let tool_calls = message["tool_calls"].as_array().map(|calls| {
-            calls.iter().map(|call| {
-                ToolCall {
-                    id: call["id"].as_str().unwrap_or_default().to_string(),
-                    call_type: call["type"].as_str().unwrap_or_default().to_string(),
-                    function: ToolFunction {
-                        name: call["function"]["name"].as_str().unwrap_or_default().to_string(),
-                        arguments: call["function"]["arguments"].clone(),
-                    },
+
+        let tool_calls = if message["tool_calls"].is_array() {
+            let mut calls = Vec::new();
+            for tc_val in message["tool_calls"].as_array().unwrap() {
+                if let Ok(tool_call) = serde_json::from_value::<ToolCall>(tc_val.clone()) {
+                    calls.push(tool_call);
                 }
-            }).collect()
-        });
-        let tool_call_id = message["tool_call_id"].as_str().map(|s| s.to_string());
+            }
+            Some(calls)
+        } else {
+            None
+        };
 
         Ok(ChatMessage {
             role,
             content,
             tool_calls,
-            tool_call_id,
+            tool_call_id: None, // OpenAI doesn't provide this on the top-level message
         })
     }
 
     async fn stream_chat_completion(&self, messages: Vec<ChatMessage>, tools: Option<Value>) -> Result<mpsc::Receiver<ChatMessage>> {
-        let (tx, rx) = mpsc::channel(100); // Channel for sending chunks
+        let (tx, rx) = mpsc::channel(100);
 
-        let mut body = serde_json::json!({
+        let mut request_body = json!({
             "model": self.model,
             "messages": messages,
-            "stream": true, // Enable streaming
+            "stream": true,
         });
 
         if let Some(t) = tools {
-            body["tools"] = t;
-            body["tool_choice"] = serde_json::json!("auto");
+            request_body["tools"] = t;
         }
 
-        let request_builder = self.client
-            .post(&format!("{}/chat/completions", self.base_url))
-            .headers(self.get_headers())
-            .json(&body);
+        let request_builder = self.client.post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body);
 
         tokio::spawn(async move {
-            let response = match request_builder.send().await {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Failed to send stream request: {:?}", e);
-                    return;
-                }
-            };
+            match request_builder.send().await {
+                Ok(response) => {
+                    let mut stream = response.bytes_stream();
+                    let mut current_content = String::new();
+                    let mut current_tool_calls: HashMap<String, ToolCall> = HashMap::new();
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                log::error!("Stream request failed with status {}: {}", status, text);
-                return;
-            }
-
-            let mut stream = response.bytes_stream();
-            let mut buffer = BytesMut::new();
-
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        buffer.extend_from_slice(&chunk);
-                        while let Some(line) = extract_line(&mut buffer) {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
-                                if data == "[DONE]" {
-                                    break;
-                                }
-                                match serde_json::from_str::<Value>(data) {
-                                    Ok(json_chunk) => {
-                                        if let Some(delta) = json_chunk["choices"][0]["delta"].as_object() {
-                                            let role = delta["role"].as_str().unwrap_or_default().to_string();
-                                            let content = delta["content"].as_str().unwrap_or_default().to_string();
-                                            
-                                            let tool_calls = delta["tool_calls"].as_array().map(|calls| {
-                                                calls.iter().map(|call| {
-                                                    ToolCall {
-                                                        id: call["id"].as_str().unwrap_or_default().to_string(),
-                                                        call_type: call["type"].as_str().unwrap_or_default().to_string(),
-                                                        function: ToolFunction {
-                                                            name: call["function"]["name"].as_str().unwrap_or_default().to_string(),
-                                                            arguments: call["function"]["arguments"].clone(),
-                                                        },
-                                                    }
-                                                }).collect()
-                                            });
-
-                                            let msg = ChatMessage {
-                                                role,
-                                                content,
-                                                tool_calls,
-                                                tool_call_id: None, // Tool call ID is for tool_message, not delta
-                                            };
-                                            if tx.send(msg).await.is_err() {
-                                                log::warn!("Receiver dropped, stopping stream.");
-                                                return;
-                                            }
+                    while let Some(chunk_result) = stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                let chunk_str = String::from_utf8_lossy(&chunk);
+                                for line in chunk_str.lines() {
+                                    if line.starts_with("data: ") {
+                                        let data = &line[6..];
+                                        if data == "[DONE]" {
+                                            break;
                                         }
-                                    },
-                                    Err(e) => log::error!("Failed to parse JSON chunk: {:?} from data: {}", e, data),
+                                        match serde_json::from_str::<Value>(data) {
+                                            Ok(event) => {
+                                                if let Some(delta) = event["choices"][0]["delta"].as_object() {
+                                                    if let Some(content_chunk) = delta["content"].as_str() {
+                                                        current_content.push_str(content_chunk);
+                                                        if tx.send(ChatMessage {
+                                                            role: "assistant".to_string(),
+                                                            content: Some(content_chunk.to_string()),
+                                                            tool_calls: None,
+                                                            tool_call_id: None,
+                                                        }).await.is_err() {
+                                                            log::warn!("Receiver dropped, stopping OpenAI stream.");
+                                                            return;
+                                                        }
+                                                    }
+                                                    
+                                                    if let Some(tool_calls_array) = delta["tool_calls"].as_array() {
+                                                        for tool_call_delta in tool_calls_array {
+                                                            let index = tool_call_delta["index"].as_u64().unwrap_or(0) as usize;
+                                                            let id = tool_call_delta["id"].as_str().unwrap_or_default().to_string();
+                                                            let name = tool_call_delta["function"]["name"].as_str().unwrap_or_default().to_string();
+                                                            let arguments_chunk = tool_call_delta["function"]["arguments"].as_str().unwrap_or_default().to_string();
+
+                                                            let entry = current_tool_calls.entry(id.clone()).or_insert_with(|| ToolCall {
+                                                                id: id.clone(),
+                                                                type_: "function".to_string(),
+                                                                function: ToolFunction {
+                                                                    name: name.clone(),
+                                                                    arguments: Value::String("".to_string()),
+                                                                },
+                                                            });
+                                                            
+                                                            // Append argument chunks
+                                                            if let Value::String(ref mut args_str) = entry.function.arguments {
+                                                                args_str.push_str(&arguments_chunk);
+                                                            } else {
+                                                                entry.function.arguments = Value::String(arguments_chunk);
+                                                            }
+
+                                                            // Send tool call delta
+                                                            if tx.send(ChatMessage {
+                                                                role: "tool_calls".to_string(),
+                                                                content: None,
+                                                                tool_calls: Some(vec![entry.clone()]), // Send current state of tool call
+                                                                tool_call_id: None,
+                                                            }).await.is_err() {
+                                                                log::warn!("Receiver dropped, stopping OpenAI stream.");
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            Err(e) => log::error!("Failed to parse OpenAI stream event: {:?} - {}", data, e),
+                                        }
+                                    }
                                 }
+                            },
+                            Err(e) => {
+                                log::error!("Error receiving chunk from OpenAI stream: {:?}", e);
+                                let _ = tx.send(ChatMessage {
+                                    role: "error".to_string(),
+                                    content: Some(format!("Stream error: {}", e)),
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                }).await;
+                                break;
                             }
                         }
-                    },
-                    Err(e) => {
-                        log::error!("Error in stream: {:?}", e);
-                        break;
                     }
+                },
+                Err(e) => {
+                    log::error!("Failed to send request to OpenAI: {:?}", e);
+                    let _ = tx.send(ChatMessage {
+                        role: "error".to_string(),
+                        content: Some(format!("Request error: {}", e)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    }).await;
                 }
             }
         });
 
         Ok(rx)
-    }
-}
-
-fn extract_line(buffer: &mut BytesMut) -> Option<String> {
-    if let Some(newline_pos) = buffer.windows(2).position(|w| w == b"\n\n") {
-        let line = buffer.split_to(newline_pos + 2);
-        String::from_utf8(line.to_vec()).ok().map(|s| s.trim().to_string())
-    } else if let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-        let line = buffer.split_to(newline_pos + 1);
-        String::from_utf8(line.to_vec()).ok().map(|s| s.trim().to_string())
-    } else {
-        None
     }
 }
