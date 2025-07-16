@@ -58,7 +58,7 @@ use crate::{
     plugins::plugin_manager::PluginManager,
     collaboration::session_sharing::SessionSharingManager,
     cloud::sync_manager::CloudSyncManager,
-    performance::benchmarks::PerformanceBenchmarks,
+    performance::benchmarks::{PerformanceBenchmarks, BenchmarkSuite}, // Import BenchmarkSuite
 };
 
 #[derive(Debug, Clone)]
@@ -103,6 +103,10 @@ pub enum Message {
     // Configuration
     ConfigLoaded(AppConfig),
     ConfigSaved,
+
+    // Performance Benchmarks
+    RunBenchmarks,
+    BenchmarkResults(BenchmarkSuite), // New message for benchmark results
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +357,9 @@ impl Application for NeoTerm {
                                 self.input_bar.update(InputMessage::NavigateSuggestions(Direction::Down));
                                 self.input_bar.update(InputMessage::ApplySuggestion);
                             }
+                            KeyCode::F1 => { // Handle F1 key for benchmarks
+                                return Command::perform(async {}, |_| Message::RunBenchmarks);
+                            }
                             _ => {}
                         }
                     }
@@ -366,6 +373,22 @@ impl Application for NeoTerm {
                 let mut settings_view = settings::SettingsView::new(self.config.clone());
                 settings_view.update(msg);
                 self.config = settings_view.config;
+                Command::none()
+            }
+            Message::RunBenchmarks => {
+                // Create a new instance of PerformanceBenchmarks to run the tests
+                Command::perform(
+                    async move {
+                        let mut benchmarks_runner = PerformanceBenchmarks::new();
+                        benchmarks_runner.run_all_benchmarks().await
+                    },
+                    Message::BenchmarkResults,
+                )
+            }
+            Message::BenchmarkResults(suite) => {
+                let summary = suite.get_performance_summary();
+                let block = Block::new_info("Performance Benchmark Results".to_string(), summary);
+                self.blocks.push(block);
                 Command::none()
             }
         }

@@ -343,6 +343,12 @@ impl PerformanceBenchmarks {
         let avg_ops_per_sec: f64 = self.results.iter().map(|r| r.operations_per_second).sum::<f64>() / self.results.len() as f64;
         let success_rate = self.results.iter().filter(|r| r.success).count() as f64 / self.results.len() as f64 * 100.0;
 
+        // Find fastest and slowest based on operations_per_second
+        let fastest_benchmark = self.results.iter()
+            .max_by(|a, b| a.operations_per_second.partial_cmp(&b.operations_per_second).unwrap_or(std::cmp::Ordering::Equal));
+        let slowest_benchmark = self.results.iter()
+            .min_by(|a, b| a.operations_per_second.partial_cmp(&b.operations_per_second).unwrap_or(std::cmp::Ordering::Equal));
+
         format!(
             "Performance Summary:\n\
             - Total benchmarks: {}\n\
@@ -355,10 +361,10 @@ impl PerformanceBenchmarks {
             total_duration.as_secs_f64(),
             avg_ops_per_sec,
             success_rate,
-            self.results.iter().max_by(|a, b| a.operations_per_second.partial_cmp(&b.operations_per_second).unwrap()).map(|r| &r.name).unwrap_or("N/A"),
-            self.results.iter().map(|r| r.operations_per_second).fold(0.0, f64::max),
-            self.results.iter().min_by(|a, b| a.operations_per_second.partial_cmp(&b.operations_per_second).unwrap()).map(|r| &r.name).unwrap_or("N/A"),
-            self.results.iter().map(|r| r.operations_per_second).fold(f64::INFINITY, f64::min)
+            fastest_benchmark.map(|r| &r.name).unwrap_or("N/A"),
+            fastest_benchmark.map(|r| r.operations_per_second).unwrap_or(0.0),
+            slowest_benchmark.map(|r| &r.name).unwrap_or("N/A"),
+            slowest_benchmark.map(|r| r.operations_per_second).unwrap_or(f64::INFINITY)
         )
     }
 
