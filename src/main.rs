@@ -25,7 +25,7 @@ use tokio::time::sleep;
 use ratatui::text::{Line, Span, Style};
 
 // Import modules
-mod agent_mode_eval;
+mod ai; // New AI module
 mod api;
 mod asset_macro;
 mod block;
@@ -59,8 +59,10 @@ mod virtual_fs;
 mod watcher;
 mod websocket;
 mod workflows;
+mod agent_mode_eval; // Keep agent_mode_eval for AgentMode struct
 
-use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage, AgentToolCall, AgentModeEvaluator, ai_client::AiConfig};
+use ai::assistant::Assistant; // Use the new AI Assistant
+use agent_mode_eval::{AgentMode, AgentConfig, AgentMessage, AgentToolCall}; // Keep AgentMode and related types
 use block::{Block, BlockContent, BlockManager, BlockType}; // Updated import path
 use shell::ShellManager;
 use input::{EnhancedTextInput, Message as InputMessage, HistoryDirection, Direction, InputManager, InputEvent};
@@ -74,7 +76,7 @@ use crate::{
     workflows::debugger::WorkflowDebugger,
     plugins::plugin_manager::PluginManager,
     collaboration::session_sharing::SessionSharingManager,
-    cloud::sync_manager::CloudSyncManager,
+    cloud::sync_manager::{CloudSyncManager as SyncManager, SyncEvent, SyncConfig}, // Renamed to SyncManager to avoid conflict
     performance::benchmarks::{PerformanceBenchmarks, BenchmarkSuite, BenchmarkResult}, // Import BenchmarkSuite
     cli::{Cli, Commands, ConfigCommands, AiCommands, PluginCommands, WorkflowCommands}, // Import CLI components
 };
@@ -88,7 +90,6 @@ use markdown_parser::MarkdownParser;
 use mcq::McqManager;
 use natural_language_detection::NaturalLanguageDetector;
 use resources::ResourceManager;
-use serve_wasm::WasmServer;
 use settings::SettingsManager;
 use string_offset::StringOffsetManager;
 use sum_tree::SumTreeManager;
@@ -98,25 +99,26 @@ use watcher::{Watcher, WatcherEvent};
 use websocket::WebSocketServer;
 use workflows::executor::WorkflowExecutor;
 use workflows::manager::WorkflowManager;
+use collaboration::session_sharing::CollaborationEvent; // Import CollaborationEvent
 
 #[derive(Debug, Clone)]
 pub struct NeoTerm {
-    blocks: Vec<Block>, // Changed from CommandBlock to Block
-    input_bar: EnhancedTextInput,
-    shell_manager: ShellManager,
-    
-    // Agent mode
-    agent_mode: Arc<RwLock<AgentMode>>,
-    agent_enabled: bool,
-    agent_streaming_rx: Option<mpsc::Receiver<AgentMessage>>, // Receiver for agent messages
-    
-    // Configuration
-    config: AppConfig,
-    settings_open: bool,
+   blocks: Vec<Block>, // Changed from CommandBlock to Block
+   input_bar: EnhancedTextInput,
+   shell_manager: ShellManager,
+   
+   // Agent mode
+   agent_mode: Arc<RwLock<AgentMode>>, // Still use AgentMode, but it will wrap the new Assistant
+   agent_enabled: bool,
+   agent_streaming_rx: Option<mpsc::Receiver<AgentMessage>>, // Receiver for agent messages
+   
+   // Configuration
+   config: AppConfig,
+   settings_open: bool,
 
-    // Channels for PTY communication
-    pty_tx: mpsc::Sender<PtyMessage>,
-    pty_rx: mpsc::Receiver<PtyMessage>,
+   // Channels for PTY communication
+   pty_tx: mpsc::Sender<PtyMessage>,
+   pty_rx: mpsc::Receiver<PtyMessage>,
 }
 
 /// Main application state.
@@ -126,7 +128,7 @@ pub struct App {
     renderer: Renderer,
     block_manager: BlockManager,
     config_manager: Arc<ConfigManager>,
-    agent_evaluator: Arc<AgentModeEvaluator>,
+    ai_assistant: Arc<RwLock<Assistant>>, // Use the new AI Assistant
     workflow_manager: Arc<WorkflowManager>,
     plugin_manager: Arc<PluginManager>,
     sync_manager: Arc<SyncManager>,
@@ -162,30 +164,30 @@ pub struct App {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Input(InputMessage),
-    ExecuteCommand,
-    PtyOutput(PtyMessage),
-    KeyboardEvent(keyboard::Event),
-    BlockAction(String, BlockMessage), // Block ID is String now
-    Tick,
-    
-    // Agent mode messages
-    ToggleAgentMode,
-    AgentStream(AgentMessage), // Streamed messages from agent
-    AgentStreamEnded,
-    AgentError(String),
-    
-    // Settings messages
-    ToggleSettings,
-    SettingsMessage(settings::SettingsMessage),
-    
-    // Configuration
-    ConfigLoaded(AppConfig),
-    ConfigSaved,
+   Input(InputMessage),
+   ExecuteCommand,
+   PtyOutput(PtyMessage),
+   KeyboardEvent(keyboard::Event),
+   BlockAction(String, BlockMessage), // Block ID is String now
+   Tick,
+   
+   // Agent mode messages
+   ToggleAgentMode,
+   AgentStream(AgentMessage), // Streamed messages from agent
+   AgentStreamEnded,
+   AgentError(String),
+   
+   // Settings messages
+   ToggleSettings,
+   SettingsMessage(settings::SettingsMessage),
+   
+   // Configuration
+   ConfigLoaded(AppConfig),
+   ConfigSaved,
 
-    // Performance Benchmarks
-    RunBenchmarks,
-    BenchmarkResults(BenchmarkSuite), // New message for benchmark results
+   // Performance Benchmarks
+   RunBenchmarks,
+   BenchmarkResults(BenchmarkSuite), // New message for benchmark results
 }
 
 /// Messages that can be sent to the main application loop.
@@ -248,8 +250,9 @@ impl Application for NeoTerm {
         
         let agent_config = {
             let mut cfg = AgentConfig::default();
+            // Load API key from environment variable for AgentConfig
             if let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() {
-                cfg.ai_config = agent_mode_eval::ai_client::AIClientConfig::OpenAI { api_key: Some(api_key) };
+                cfg.api_key = Some(api_key);
             }
             cfg
         };
@@ -345,7 +348,7 @@ impl Application for NeoTerm {
                         let mut agent_mode = agent_mode_arc_clone.write().await;
                         let enabled = agent_mode.toggle();
                         if enabled {
-                            if let Ok(_) = agent_mode.start_conversation() {
+                            if let Ok(_) = agent_mode.start_conversation().await { // Await start_conversation
                                 Some("Agent mode activated. How can I help you?".to_string())
                             } else {
                                 None
@@ -402,10 +405,6 @@ impl Application for NeoTerm {
                     }
                     AgentMessage::SystemMessage(content) => {
                         let block = Block::new_info("System Message".to_string(), content);
-                        self.blocks.push(block);
-                    }
-                    AgentMessage::Error(error) => {
-                        let block = Block::new_error(format!("Agent error: {}", error));
                         self.blocks.push(block);
                     }
                     AgentMessage::Done => {
@@ -653,6 +652,10 @@ impl NeoTerm {
                         BlockContent::Error { message, .. } => {
                             format!("Error: {}", message)
                         },
+                        BlockContent::Welcome => "Welcome message".to_string(),
+                        BlockContent::Terminal => "Terminal block".to_string(),
+                        BlockContent::BenchmarkResults => "Benchmark results".to_string(),
+                        BlockContent::Output { output, .. } => output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n"),
                     });
                     self.handle_ai_command(prompt, Some(block_id.clone()))
                 }
@@ -794,16 +797,13 @@ impl App {
         let watcher = Arc::new(Watcher::new(watcher_event_tx));
         watcher.init().await?;
 
-        // Initialize AI Agent
-        let ai_config = AiConfig {
-            api_key: preferences.ai_api_key.clone(),
-            model: preferences.ai_model.clone(),
-            temperature: preferences.ai_temperature,
-            max_tokens: preferences.ai_max_tokens,
-            ..Default::default()
-        };
-        let agent_evaluator = Arc::new(AgentModeEvaluator::new(ai_config, "You are a helpful assistant.".to_string()));
-        agent_evaluator.init().await?;
+        // Initialize AI Assistant
+        let ai_assistant = Arc::new(RwLock::new(Assistant::new(
+            &preferences.ai_provider_type,
+            preferences.ai_api_key.clone(),
+            preferences.ai_model.clone(),
+        )?));
+        // No explicit init for Assistant, its internal components are ready on new()
 
         // Initialize other modules
         let workflow_manager = Arc::new(WorkflowManager::new());
@@ -857,7 +857,7 @@ impl App {
             renderer,
             block_manager,
             config_manager,
-            agent_evaluator,
+            ai_assistant, // Use the new AI Assistant
             workflow_manager,
             plugin_manager,
             sync_manager,
@@ -905,9 +905,9 @@ impl App {
             });
         }
         if self.preferences.enable_ai_assistant {
-            let evaluator_clone = self.agent_evaluator.clone();
+            let assistant_clone = self.ai_assistant.clone(); // Use the new assistant
             tokio::spawn(async move {
-                api::run_api_server(evaluator_clone).await;
+                api::run_api_server(assistant_clone).await; // Pass the new assistant
             });
         }
 
@@ -1082,7 +1082,7 @@ impl App {
                 log::info!("Command Event: {:?}", event);
                 let content = match event {
                     CommandEvent::Started { id, command_line } => vec![Line::from(format!("Cmd {}: Started: {}", id, command_line))],
-                    CommandEvent::Output { id, data, is_stderr } => {
+                    CommandEvent::Output { data, is_stderr } => {
                         let output_str = String::from_utf8_lossy(&data);
                         vec![Line::from(format!("Cmd {}: {}{}", id, if is_stderr { "[ERR] " } else { "" }, output_str))]
                     },
@@ -1188,6 +1188,7 @@ async fn main() -> Result<()> {
     settings::theme_editor::init();
     settings::yaml_theme_ui::init();
     shell::init();
+    ai::init(); // Initialize the new AI module
 
     let (mut app, app_tx) = App::new().await?;
 
@@ -1264,27 +1265,35 @@ async fn main() -> Result<()> {
             }
         }
         Some(cli::Commands::Ai { action }) => {
-            let evaluator = app.agent_evaluator.clone();
+            let assistant = app.ai_assistant.clone(); // Use the new assistant
             match action {
                 cli::AiCommands::Chat { message } => {
                     println!("Sending message to AI: {}", message);
-                    match evaluator.handle_user_input(message).await {
-                        Ok(responses) => {
-                            for msg in responses {
-                                println!("AI: {}", msg.content);
+                    let mut assistant_lock = assistant.write().await;
+                    match assistant_lock.stream_chat(&message).await { // Use stream_chat
+                        Ok(mut rx) => {
+                            while let Some(msg) = rx.recv().await {
+                                match msg.role.as_str() {
+                                    "assistant" => print!("{}", msg.content),
+                                    "tool_calls" => println!("\nAI Tool Call: {:?}", msg.tool_calls),
+                                    _ => {}
+                                }
                             }
+                            println!("\n"); // Newline after stream
                         }
                         Err(e) => eprintln!("Error from AI: {}", e),
                     }
                 }
                 cli::AiCommands::History => {
                     println!("AI Conversation History:");
-                    for msg in evaluator.get_conversation_history().await {
+                    let assistant_lock = assistant.read().await;
+                    for msg in assistant_lock.get_history() {
                         println!("{}: {}", msg.role, msg.content);
                     }
                 }
                 cli::AiCommands::Reset => {
-                    evaluator.reset_conversation().await;
+                    let mut assistant_lock = assistant.write().await;
+                    assistant_lock.clear_history();
                     println!("AI conversation reset.");
                 }
             }
@@ -1352,7 +1361,7 @@ async fn main() -> Result<()> {
                     let executor = WorkflowExecutor::new(
                         app.command_manager.clone(),
                         app.virtual_file_system.clone(),
-                        app.agent_evaluator.clone(),
+                        app.ai_assistant.clone(), // Pass the new assistant
                         app.resource_manager.clone(),
                         app.plugin_manager.clone(),
                         app.shell_manager.clone(),
