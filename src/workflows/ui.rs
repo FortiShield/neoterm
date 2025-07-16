@@ -1,7 +1,8 @@
-use iced::{Element, widget::{column, row, text, button, text_input, scrollable, container, pick_list}};
-use crate::workflows::{WorkflowManager, Workflow, WorkflowSearchResult, WorkflowCategory, Shell, WorkflowArgument, ArgumentType};
-use std::collections::HashMap;
+use iced::{Element, widget::{column, row, text, button, text_input, scrollable, container}, Length};
+use crate::workflows::{Workflow, WorkflowStep};
+use crate::Message;
 
+/// Represents the UI for managing workflows.
 #[derive(Debug, Clone)]
 pub struct WorkflowUI {
     manager: WorkflowManager,
@@ -9,19 +10,23 @@ pub struct WorkflowUI {
     selected_category: Option<WorkflowCategory>,
     selected_shell: Option<Shell>,
     search_results: Vec<WorkflowSearchResult>,
-    selected_workflow: Option<Workflow>,
+    pub selected_workflow: Option<Workflow>,
     argument_values: HashMap<String, String>,
     show_workflow_details: bool,
     show_create_workflow: bool,
     new_workflow: Workflow,
+    workflow_editor: WorkflowEditor,
+    pub new_workflow_name: String,
+    pub new_step_command: String,
+    pub new_step_name: String,
 }
 
 #[derive(Debug, Clone)]
-pub enum Message {
+pub enum WorkflowMessage {
     SearchChanged(String),
     CategorySelected(Option<WorkflowCategory>),
     ShellSelected(Option<Shell>),
-    WorkflowSelected(Workflow),
+    WorkflowSelected(String),
     ArgumentChanged(String, String),
     ExecuteWorkflow,
     DryRunWorkflow,
@@ -33,12 +38,19 @@ pub enum Message {
     ImportWorkflow(String),
     ExportWorkflow(String),
     RefreshWorkflows,
+    NewWorkflowNameChanged(String),
+    CreateNewWorkflow,
+    StepCommandChanged(String),
+    StepNameChanged(String),
+    AddStepToWorkflow,
+    RemoveStepFromWorkflow(usize),
 }
 
 impl WorkflowUI {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let manager = WorkflowManager::new()?;
         let search_results = manager.get_all_workflows(None);
+        let workflow_editor = WorkflowEditor::new();
 
         Ok(Self {
             manager,
@@ -64,76 +76,111 @@ impl WorkflowUI {
                 last_used: None,
                 usage_count: 0,
             },
+            workflow_editor,
+            new_workflow_name: String::new(),
+            new_step_command: String::new(),
+            new_step_name: String::new(),
         })
     }
 
-    pub fn update(&mut self, message: Message) -> Option<WorkflowExecutionRequest> {
+    pub fn update(&mut self, message: WorkflowMessage) {
         match message {
-            Message::SearchChanged(query) => {
+            WorkflowMessage::SearchChanged(query) => {
                 self.search_query = query;
                 self.update_search_results();
-                None
             }
-            Message::CategorySelected(category) => {
+            WorkflowMessage::CategorySelected(category) => {
                 self.selected_category = category;
                 self.update_search_results();
-                None
             }
-            Message::ShellSelected(shell) => {
+            WorkflowMessage::ShellSelected(shell) => {
                 self.selected_shell = shell;
                 self.update_search_results();
-                None
             }
-            Message::WorkflowSelected(workflow) => {
-                self.selected_workflow = Some(workflow.clone());
+            WorkflowMessage::WorkflowSelected(name) => {
+                self.selected_workflow = self.workflows.iter().find(|wf| wf.name == name).cloned();
                 self.argument_values.clear();
                 
                 // Initialize argument values with defaults
-                for arg in &workflow.arguments {
-                    if let Some(default) = &arg.default_value {
-                        self.argument_values.insert(arg.name.clone(), default.clone());
+                if let Some(workflow) = &self.selected_workflow {
+                    for arg in &workflow.arguments {
+                        if let Some(default) = &arg.default_value {
+                            self.argument_values.insert(arg.name.clone(), default.clone());
+                        }
                     }
                 }
-                None
             }
-            Message::ArgumentChanged(name, value) => {
+            WorkflowMessage::ArgumentChanged(name, value) => {
                 self.argument_values.insert(name, value);
-                None
             }
-            Message::ExecuteWorkflow => {
-                if let Some(workflow) = &self.selected_workflow {
-                    Some(WorkflowExecutionRequest {
-                        workflow: workflow.clone(),
-                        arguments: self.argument_values.clone(),
-                        dry_run: false,
-                    })
-                } else {
-                    None
-                }
+            WorkflowMessage::ExecuteWorkflow => {
+                // Handle workflow execution
             }
-            Message::DryRunWorkflow => {
-                if let Some(workflow) = &self.selected_workflow {
-                    Some(WorkflowExecutionRequest {
-                        workflow: workflow.clone(),
-                        arguments: self.argument_values.clone(),
-                        dry_run: true,
-                    })
-                } else {
-                    None
-                }
+            WorkflowMessage::DryRunWorkflow => {
+                // Handle dry run workflow
             }
-            Message::ShowWorkflowDetails(show) => {
+            WorkflowMessage::ShowWorkflowDetails(show) => {
                 self.show_workflow_details = show;
-                None
             }
-            Message::RefreshWorkflows => {
+            WorkflowMessage::RefreshWorkflows => {
                 if let Err(e) = self.manager.load_workflows() {
                     eprintln!("Failed to refresh workflows: {}", e);
                 }
                 self.update_search_results();
-                None
             }
-            _ => None,
+            WorkflowMessage::NewWorkflowNameChanged(name) => {
+                self.new_workflow_name = name;
+            }
+            WorkflowMessage::CreateNewWorkflow => {
+                if !self.new_workflow_name.is_empty() {
+                    let new_workflow = Workflow {
+                        name: self.new_workflow_name.clone(),
+                        description: "New workflow".to_string(),
+                        steps: Vec::new(),
+                        environment: HashMap::new(),
+                        timeout: None,
+                    };
+                    self.workflows.push(new_workflow.clone());
+                    self.selected_workflow = Some(new_workflow);
+                    self.new_workflow_name.clear();
+                }
+            }
+            WorkflowMessage::DeleteWorkflow(name) => {
+                self.workflows.retain(|wf| wf.name != name);
+                self.selected_workflow = None;
+            }
+            WorkflowMessage::StepCommandChanged(command) => {
+                self.new_step_command = command;
+            }
+            WorkflowMessage::StepNameChanged(name) => {
+                self.new_step_name = name;
+            }
+            WorkflowMessage::AddStepToWorkflow => {
+                if let Some(workflow) = self.selected_workflow.as_mut() {
+                    if !self.new_step_name.is_empty() && !self.new_step_command.is_empty() {
+                        let new_step = WorkflowStep {
+                            name: self.new_step_name.clone(),
+                            command: self.new_step_command.clone(),
+                            args: Vec::new(),
+                            working_directory: None,
+                            environment: HashMap::new(),
+                            timeout: None,
+                            retry_count: 0,
+                            condition: None,
+                        };
+                        workflow.steps.push(new_step);
+                        self.new_step_name.clear();
+                        self.new_step_command.clear();
+                    }
+                }
+            }
+            WorkflowMessage::RemoveStepFromWorkflow(index) => {
+                if let Some(workflow) = self.selected_workflow.as_mut() {
+                    if index < workflow.steps.len() {
+                        workflow.steps.remove(index);
+                    }
+                }
+            }
         }
     }
 
@@ -156,7 +203,7 @@ impl WorkflowUI {
         };
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&self) -> Element<WorkflowMessage> {
         let main_content = column![
             self.create_header(),
             self.create_filters(),
@@ -177,25 +224,25 @@ impl WorkflowUI {
         }
     }
 
-    fn create_header(&self) -> Element<Message> {
+    fn create_header(&self) -> Element<WorkflowMessage> {
         row![
             text("Workflows").size(24),
             // Spacer
             iced::widget::horizontal_space(iced::Length::Fill),
             text_input("Search workflows...", &self.search_query)
-                .on_input(Message::SearchChanged)
+                .on_input(WorkflowMessage::SearchChanged)
                 .width(iced::Length::Fixed(300.0)),
             button("Refresh")
-                .on_press(Message::RefreshWorkflows),
+                .on_press(WorkflowMessage::RefreshWorkflows),
             button("Create")
-                .on_press(Message::ShowCreateWorkflow(true)),
+                .on_press(WorkflowMessage::ShowCreateWorkflow(true)),
         ]
         .spacing(8)
         .align_items(iced::Alignment::Center)
         .into()
     }
 
-    fn create_filters(&self) -> Element<Message> {
+    fn create_filters(&self) -> Element<WorkflowMessage> {
         let categories: Vec<Option<WorkflowCategory>> = std::iter::once(None)
             .chain(self.manager.get_categories().into_iter().map(Some))
             .collect();
@@ -212,7 +259,7 @@ impl WorkflowUI {
             pick_list(
                 categories,
                 self.selected_category.clone(),
-                Message::CategorySelected
+                WorkflowMessage::CategorySelected
             )
             .placeholder("All Categories"),
             
@@ -220,7 +267,7 @@ impl WorkflowUI {
             pick_list(
                 shells,
                 self.selected_shell.clone(),
-                Message::ShellSelected
+                WorkflowMessage::ShellSelected
             )
             .placeholder("All Shells"),
             
@@ -234,7 +281,7 @@ impl WorkflowUI {
         .into()
     }
 
-    fn create_workflow_list(&self) -> Element<Message> {
+    fn create_workflow_list(&self) -> Element<WorkflowMessage> {
         if self.search_results.is_empty() {
             return container(
                 text("No workflows found")
@@ -261,7 +308,7 @@ impl WorkflowUI {
         .into()
     }
 
-    fn create_workflow_card(&self, result: &WorkflowSearchResult) -> Element<Message> {
+    fn create_workflow_card(&self, result: &WorkflowSearchResult) -> Element<WorkflowMessage> {
         let workflow = &result.workflow;
         let is_selected = self.selected_workflow.as_ref()
             .map_or(false, |selected| selected.name == workflow.name);
@@ -331,7 +378,7 @@ impl WorkflowUI {
             },
             
             button("Select")
-                .on_press(Message::WorkflowSelected(workflow.clone()))
+                .on_press(WorkflowMessage::WorkflowSelected(workflow.name.clone()))
                 .style(if is_selected {
                     button::primary
                 } else {
@@ -362,7 +409,7 @@ impl WorkflowUI {
             .into()
     }
 
-    fn create_workflow_details(&self) -> Element<Message> {
+    fn create_workflow_details(&self) -> Element<WorkflowMessage> {
         if let Some(workflow) = &self.selected_workflow {
             column![
                 text("Workflow Details").size(18),
@@ -412,12 +459,12 @@ impl WorkflowUI {
                 // Actions
                 row![
                     button("Execute")
-                        .on_press(Message::ExecuteWorkflow)
+                        .on_press(WorkflowMessage::ExecuteWorkflow)
                         .style(button::primary),
                     button("Dry Run")
-                        .on_press(Message::DryRunWorkflow),
+                        .on_press(WorkflowMessage::DryRunWorkflow),
                     button("Details")
-                        .on_press(Message::ShowWorkflowDetails(true)),
+                        .on_press(WorkflowMessage::ShowWorkflowDetails(true)),
                 ]
                 .spacing(8),
             ]
@@ -428,7 +475,7 @@ impl WorkflowUI {
         }
     }
 
-    fn create_argument_input(&self, arg: &WorkflowArgument) -> Element<Message> {
+    fn create_argument_input(&self, arg: &WorkflowArgument) -> Element<WorkflowMessage> {
         let current_value = self.argument_values
             .get(&arg.name)
             .cloned()
@@ -440,7 +487,7 @@ impl WorkflowUI {
                 pick_list(
                     options,
                     if current_value.is_empty() { None } else { Some(current_value) },
-                    move |value| Message::ArgumentChanged(arg.name.clone(), value)
+                    move |value| WorkflowMessage::ArgumentChanged(arg.name.clone(), value)
                 )
                 .placeholder("Select...")
                 .into()
@@ -450,19 +497,19 @@ impl WorkflowUI {
                     pick_list(
                         options.clone(),
                         if current_value.is_empty() { None } else { Some(current_value) },
-                        move |value| Message::ArgumentChanged(arg.name.clone(), value)
+                        move |value| WorkflowMessage::ArgumentChanged(arg.name.clone(), value)
                     )
                     .placeholder("Select...")
                     .into()
                 } else {
                     text_input("Value...", &current_value)
-                        .on_input(move |value| Message::ArgumentChanged(arg.name.clone(), value))
+                        .on_input(move |value| WorkflowMessage::ArgumentChanged(arg.name.clone(), value))
                         .into()
                 }
             }
             _ => {
                 text_input("Value...", &current_value)
-                    .on_input(move |value| Message::ArgumentChanged(arg.name.clone(), value))
+                    .on_input(move |value| WorkflowMessage::ArgumentChanged(arg.name.clone(), value))
                     .into()
             }
         };
@@ -502,12 +549,16 @@ impl WorkflowUI {
         .into()
     }
 
-    fn create_workflow_dialog(&self) -> Element<Message> {
+    fn create_workflow_dialog(&self) -> Element<WorkflowMessage> {
         // Placeholder for workflow creation dialog
         container(text("Create Workflow Dialog Placeholder"))
             .center_x()
             .center_y()
             .into()
+    }
+
+    pub fn render_editor(&self, frame: &mut Frame, area: Rect) {
+        self.workflow_editor.render(frame, area);
     }
 }
 
@@ -516,4 +567,26 @@ pub struct WorkflowExecutionRequest {
     workflow: Workflow,
     arguments: HashMap<String, String>,
     dry_run: bool,
+}
+
+pub struct WorkflowEditor {
+    // Add state for editing a workflow
+}
+
+impl WorkflowEditor {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled("Workflow Editor", Style::default().fg(Color::LightGreen)));
+
+        let paragraph = Paragraph::new(Line::from("Workflow editor content goes here."))
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false });
+
+        frame.render_widget(paragraph, area);
+    }
 }

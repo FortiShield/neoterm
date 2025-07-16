@@ -1,5 +1,12 @@
+id: git-status
 name: Git Status
-description: Shows the current git status.
+description: Shows the status of a Git repository.
 steps:
-  - name: Git status
-    command: git status
+  - id: git-status-check
+    name: Check Git Status
+    command: git
+    args: ["status"]
+    environment: {}
+    timeout: 30
+    retry_count: 0
+    condition: ""

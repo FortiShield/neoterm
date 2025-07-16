@@ -159,3 +159,95 @@ impl WorkflowExecutor {
                 },
                 Err(e) => {
                     log::error!("Step '{}' failed: {:?}", step_name, e);
+                    self.event_sender.send(WorkflowExecutionEvent::StepFailed {
+                        workflow_id: workflow.id.clone(),
+                        step_id,
+                        name: step_name,
+                        error: e.to_string(),
+                    }).await?;
+                    success = false;
+                    break; // Stop on first error
+                }
+            }
+        }
+
+        self.event_sender.send(WorkflowExecutionEvent::Completed {
+            workflow_id: workflow.id.clone(),
+            name: workflow.name.clone(),
+            success,
+        }).await?;
+
+        if success {
+            log::info!("Workflow '{}' completed successfully.", workflow.name);
+        } else {
+            log::error!("Workflow '{}' failed.", workflow.name);
+        }
+        Ok(())
+    }
+
+    /// Executes a single workflow step.
+    pub async fn execute_step(&self, step: &WorkflowStep, context: &mut HashMap<String, Value>) -> Result<String> {
+        log::info!("Executing workflow step: {}", step.name);
+
+        // 1. Command Execution
+        let command_output = self.execute_command_step(step).await?;
+
+        // 2. Output Handling (based on format)
+        let output = match &step.output_format {
+            WorkflowOutputFormat::PlainText => command_output,
+            WorkflowOutputFormat::Json => {
+                // Attempt to parse as JSON and add to context
+                match serde_json::from_str::<Value>(&command_output) {
+                    Ok(json_value) => {
+                        if let Some(var_name) = &step.output_variable {
+                            context.insert(var_name.clone(), json_value);
+                            format!("Parsed JSON and stored in variable: {}", var_name)
+                        } else {
+                            "Parsed JSON but no output variable specified.".to_string()
+                        }
+                    }
+                    Err(e) => return Err(anyhow!("Failed to parse command output as JSON: {}", e)),
+                }
+            }
+            WorkflowOutputFormat::Regex { pattern } => {
+                // Extract a specific part of the output using a regex
+                let re = regex::Regex::new(pattern)?;
+                if let Some(capture) = re.captures(&command_output) {
+                    if capture.len() > 1 {
+                        let extracted_value = capture.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+                        if let Some(var_name) = &step.output_variable {
+                            context.insert(var_name.clone(), Value::String(extracted_value.clone()));
+                            format!("Extracted value using regex and stored in variable: {}", var_name)
+                        } else {
+                            format!("Extracted value using regex: {}", extracted_value)
+                        }
+                    } else {
+                        "Regex matched but no capture group found.".to_string()
+                    }
+                } else {
+                    "Regex did not match the output.".to_string()
+                }
+            }
+        };
+
+        Ok(output)
+    }
+
+    async fn execute_command_step(&self, step: &WorkflowStep) -> Result<String> {
+        let cmd_id = Uuid::new_v4().to_string();
+        let cmd = Command {
+            id: cmd_id.clone(),
+            name: step.name.clone(),
+            description: format!("Workflow step: {}", step.name),
+            executable: step.command.clone(),
+            args: step.args.clone(),
+            env: step.environment.clone(),
+            working_dir: step.working_directory.clone(),
+            output_format: command::CommandOutputFormat::PlainText, // Or derive from step
+        };
+
+        self.command_manager.execute_command(cmd).await?;
+        // In a real implementation, you'd capture the output and handle errors
+        Ok(format!("Command '{}' executed (awaiting real output).", step.command))
+    }
+}

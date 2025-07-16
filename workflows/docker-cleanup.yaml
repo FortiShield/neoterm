@@ -1,5 +1,6 @@
+id: docker-cleanup
 name: "Docker Cleanup"
-description: "Cleans up unused Docker resources."
+description: "Removes unused Docker images and containers."
 command: |
   echo "Cleaning up Docker resources..."
   docker container prune -f
@@ -16,6 +17,30 @@ arguments:
     arg_type: boolean
     required: false
 steps:
+  - id: remove-exited-containers
+    name: "Remove Exited Containers"
+    command: docker
+    args: ["rm", "-v", "$(docker ps -a -q -f status=exited)"]
+    environment: {}
+    timeout: 30
+    retry_count: 0
+    condition: ""
+  - id: remove-dangling-images
+    name: "Remove Dangling Images"
+    command: docker
+    args: ["rmi", "$(docker images -f dangling=true -q)"]
+    environment: {}
+    timeout: 30
+    retry_count: 0
+    condition: ""
+  - id: remove-build-cache
+    name: "Remove Docker Build Cache"
+    command: docker
+    args: ["builder", "prune", "-a", "-f"]
+    environment: {}
+    timeout: 60
+    retry_count: 0
+    condition: ""
   - name: Prune Docker system
     command: docker system prune -f
   - name: Prune Docker volumes

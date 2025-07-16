@@ -1,68 +1,24 @@
-# NeoTerm Distribution & Packaging
+# Packaging
 
-This directory outlines the process and tools used to package NeoTerm for various operating systems. The actual packaging steps are typically executed via `cargo` subcommands or dedicated build scripts, not directly within the application's source code.
+This directory contains the tools and processes for generating the various installers for NeoTerm.
 
-## Linux Packages
+## Tools
 
-NeoTerm aims to provide distribution-specific packages for Linux users.
+- `cargo-deb`: For creating `.deb` packages (Debian/Ubuntu).
+- `cargo-rpm`: For creating `.rpm` packages (Fedora/CentOS/RHEL).
+- `cargo-wix`: For creating `.msi` packages (Windows).
+- `cargo-bundle`: For creating macOS `.app` bundles and `.dmg` images.
 
-### AppImage
-AppImage is a universal Linux package format that allows applications to run on various distributions without needing to be installed.
+## Scripts
 
-**Tool**: `cargo-bundle` (or custom shell scripts)
-**Command Example**:
-\`\`\`bash
-cargo install cargo-bundle
-cargo bundle appimage --release
-\`\`\`
-This will generate an `.AppImage` file in `target/release/bundle/AppImage/`.
+- `build_deb.sh`: Builds the `.deb` package.
+- `build_rpm.sh`: Builds the `.rpm` package.
+- `build_msi.ps1`: Builds the `.msi` package.
+- `build_app.sh`: Builds the macOS `.app` bundle.
+- `build_dmg.sh`: Creates the macOS `.dmg` image.
 
-### Debian (.deb)
-Debian packages are used by Debian, Ubuntu, Mint, and other derivative distributions.
+## Process
 
-**Tool**: `cargo-deb`
-**Command Example**:
-\`\`\`bash
-cargo install cargo-deb
-cargo deb --release
-\`\`\`
-This will generate a `.deb` file in `target/debian/`.
-
-### RPM (.rpm)
-RPM packages are used by Fedora, CentOS, RHEL, openSUSE, and other RPM-based distributions.
-
-**Tool**: `cargo-rpm`
-**Command Example**:
-\`\`\`bash
-cargo install cargo-rpm
-cargo rpm --release
-\`\`\`
-This will generate an `.rpm` file in `target/release/rpm/`.
-
-## macOS Installer (.dmg)
-
-For macOS, NeoTerm provides a disk image (`.dmg`) for easy distribution.
-
-**Tool**: `cargo-bundle` (or custom shell scripts)
-**Command Example**:
-\`\`\`bash
-cargo install cargo-bundle
-cargo bundle dmg --release
-\`\`\`
-This will generate a `.dmg` file in `target/release/bundle/dmg/`.
-
-## Windows Installer (.msi)
-
-For Windows, NeoTerm provides a Microsoft Installer (`.msi`) package.
-
-**Tool**: `cargo-wix` (requires WiX Toolset installed)
-**Command Example**:
-\`\`\`bash
-cargo install cargo-wix
-cargo wix --release
-\`\`\`
-This will generate an `.msi` file in `target/wix/`.
-
----
-
-**Note**: Before running these commands, ensure you have the respective `cargo` subcommands installed and any external dependencies (like WiX Toolset for Windows) are met. These commands should be executed from the root directory of the NeoTerm project.
+1.  Install the required tools.
+2.  Run the appropriate script for your target platform.
+3.  The installer will be generated in the `target/release` directory.

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use anyhow::Result;
 use tree_sitter::{Language, Parser};
+// use syntect::{highlighting::Highlighter, parsing::SyntaxSet};
 
 /// Represents a programming language supported by NeoTerm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
