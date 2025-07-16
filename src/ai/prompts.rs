@@ -1,5 +1,6 @@
 use crate::ai::context::AIContext;
 use crate::ai::providers::ChatMessage;
+use std::collections::HashMap; // Import HashMap
 
 pub struct PromptBuilder;
 
@@ -9,7 +10,7 @@ impl PromptBuilder {
     }
 
     pub fn build_suggestion_prompt(&self, context: &AIContext) -> ChatMessage {
-        let mut prompt = String::from("You are a helpful terminal assistant. Suggest relevant commands or actions based on the user's current context and query. Be concise.
+        let mut prompt = String::from("You are an intelligent terminal assistant providing helpful suggestions. Based on the user's current context, suggest relevant commands, files, or actions.
 
 ");
         prompt.push_str(&format!("Current Working Directory: {}
@@ -26,7 +27,7 @@ impl PromptBuilder {
             prompt.push_str(&format!("Selected Text: {}
 ", selected_text));
         }
-        prompt.push_str("Suggest a command or action.");
+        prompt.push_str("Provide concise and actionable suggestions.");
 
         ChatMessage {
             role: "system".to_string(),

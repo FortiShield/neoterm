@@ -815,12 +815,14 @@ impl NeoTerm {
                                 let _ = pty_tx.send(PtyMessage::OutputChunk {
                                     block_id: block_id.clone(),
                                     content: output.stdout,
+                                    is_stdout: true,
                                 }).await;
                             }
                             if !output.stderr.is_empty() {
                                 let _ = pty_tx.send(PtyMessage::OutputChunk {
                                     block_id: block_id.clone(),
                                     content: output.stderr,
+                                    is_stdout: false,
                                 }).await;
                             }
                         }
