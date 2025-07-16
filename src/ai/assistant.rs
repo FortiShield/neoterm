@@ -9,27 +9,109 @@ use serde_json::Value;
 use crate::workflows::Workflow; // Import Workflow struct
 
 pub struct Assistant {
-    provider: Box<dyn AIProvider + Send + Sync>,
+    primary_provider: Box<dyn AIProvider + Send + Sync>,
+    fallback_provider: Option<Box<dyn AIProvider + Send + Sync>>,
     prompt_builder: PromptBuilder,
     context: AIContext,
     pub conversation_history: Vec<ChatMessage>, // Made public for AgentMode to manage
 }
 
 impl Assistant {
-    pub fn new(provider_type: &str, api_key: Option<String>, model: String) -> Result<Self> {
-        let provider: Box<dyn AIProvider + Send + Sync> = match provider_type {
-            "openai" => Box::new(OpenAIProvider::new(api_key, model)?),
-            "ollama" => Box::new(OllamaProvider::new(model)?),
-            "anthropic" => Box::new(AnthropicProvider::new(api_key, model)?),
-            _ => return Err(anyhow!("Unsupported AI provider: {}", provider_type)),
+    pub fn new(
+        primary_provider_type: &str,
+        primary_api_key: Option<String>,
+        primary_model: String,
+        fallback_provider_type: Option<String>,
+        fallback_api_key: Option<String>, // Fallback API key might be different
+        fallback_model: Option<String>,
+    ) -> Result<Self> {
+        let primary_provider: Box<dyn AIProvider + Send + Sync> = match primary_provider_type {
+            "openai" => Box::new(OpenAIProvider::new(primary_api_key, primary_model)?),
+            "ollama" => Box::new(OllamaProvider::new(primary_model)?),
+            "anthropic" => Box::new(AnthropicProvider::new(primary_api_key, primary_model)?),
+            _ => return Err(anyhow!("Unsupported primary AI provider: {}", primary_provider_type)),
+        };
+
+        let fallback_provider = if let Some(fb_type) = fallback_provider_type {
+            if let Some(fb_model) = fallback_model {
+                match fb_type.as_str() {
+                    "openai" => Some(Box::new(OpenAIProvider::new(fallback_api_key, fb_model)?)),
+                    "ollama" => Some(Box::new(OllamaProvider::new(fb_model)?)),
+                    "anthropic" => Some(Box::new(AnthropicProvider::new(fallback_api_key, fb_model)?)),
+                    _ => {
+                        log::warn!("Unsupported fallback AI provider: {}. Fallback will not be used.", fb_type);
+                        None
+                    }
+                }
+            } else {
+                log::warn!("Fallback AI provider type specified but no model. Fallback will not be used.");
+                None
+            }
+        } else {
+            None
         };
 
         Ok(Self {
-            provider,
+            primary_provider,
+            fallback_provider,
             prompt_builder: PromptBuilder::new(),
             context: AIContext::new(),
             conversation_history: Vec::new(),
         })
+    }
+
+    async fn try_chat_completion(&self, messages: Vec<ChatMessage>, tools: Option<Value>) -> Result<ChatMessage> {
+        // Try primary provider first
+        match self.primary_provider.chat_completion(messages.clone(), tools.clone()).await {
+            Ok(response) => {
+                log::debug!("Chat completion successful with primary provider: {}", self.primary_provider.name());
+                Ok(response)
+            },
+            Err(e) => {
+                log::warn!("Primary AI provider ({}) failed: {}. Attempting fallback...", self.primary_provider.name(), e);
+                if let Some(fb_provider) = &self.fallback_provider {
+                    match fb_provider.chat_completion(messages, tools).await {
+                        Ok(response) => {
+                            log::info!("Chat completion successful with fallback provider: {}", fb_provider.name());
+                            Ok(response)
+                        },
+                        Err(fb_e) => {
+                            log::error!("Fallback AI provider ({}) also failed: {}", fb_provider.name(), fb_e);
+                            Err(anyhow!("Both primary and fallback AI providers failed. Primary error: {}, Fallback error: {}", e, fb_e))
+                        }
+                    }
+                } else {
+                    Err(anyhow!("Primary AI provider ({}) failed and no fallback configured: {}", self.primary_provider.name(), e))
+                }
+            }
+        }
+    }
+
+    async fn try_stream_chat_completion(&self, messages: Vec<ChatMessage>, tools: Option<Value>) -> Result<mpsc::Receiver<ChatMessage>> {
+        // Try primary provider first
+        match self.primary_provider.stream_chat_completion(messages.clone(), tools.clone()).await {
+            Ok(receiver) => {
+                log::debug!("Stream chat completion successful with primary provider: {}", self.primary_provider.name());
+                Ok(receiver)
+            },
+            Err(e) => {
+                log::warn!("Primary AI provider ({}) stream failed: {}. Attempting fallback...", self.primary_provider.name(), e);
+                if let Some(fb_provider) = &self.fallback_provider {
+                    match fb_provider.stream_chat_completion(messages, tools).await {
+                        Ok(receiver) => {
+                            log::info!("Stream chat completion successful with fallback provider: {}", fb_provider.name());
+                            Ok(receiver)
+                        },
+                        Err(fb_e) => {
+                            log::error!("Fallback AI provider ({}) stream also failed: {}", fb_provider.name(), fb_e);
+                            Err(anyhow!("Both primary and fallback AI providers stream failed. Primary error: {}, Fallback error: {}", e, fb_e))
+                        }
+                    }
+                } else {
+                    Err(anyhow!("Primary AI provider ({}) stream failed and no fallback configured: {}", self.primary_provider.name(), e))
+                }
+            }
+        }
     }
 
     pub async fn suggest(&mut self, user_query: &str) -> Result<String> {
@@ -46,7 +128,7 @@ impl Assistant {
         messages.extend(self.conversation_history.clone());
         messages.push(user_message);
 
-        let response = self.provider.chat_completion(messages, None).await?;
+        let response = self.try_chat_completion(messages, None).await?;
         self.conversation_history.push(response.clone());
         Ok(response.content.unwrap_or_default())
     }
@@ -63,7 +145,7 @@ impl Assistant {
 
         let messages = vec![system_prompt, user_message]; // No history for fix to keep it focused
 
-        let response = self.provider.chat_completion(messages, None).await?;
+        let response = self.try_chat_completion(messages, None).await?;
         // Do NOT add to conversation history, as this is a specific command generation/fix, not general chat.
         Ok(response.content.unwrap_or_default().trim().to_string()) // Trim to remove any leading/trailing whitespace
     }
@@ -82,7 +164,7 @@ impl Assistant {
         messages.extend(self.conversation_history.clone());
         messages.push(user_message);
 
-        let response = self.provider.chat_completion(messages, None).await?;
+        let response = self.try_chat_completion(messages, None).await?;
         self.conversation_history.push(response.clone());
         Ok(response.content.unwrap_or_default())
     }
@@ -100,7 +182,7 @@ impl Assistant {
             tool_call_id: None,
         });
 
-        self.provider.stream_chat_completion(messages, None).await
+        self.try_stream_chat_completion(messages, None).await
     }
 
     pub async fn generate_command(&mut self, natural_language_query: &str) -> Result<String> {
@@ -115,7 +197,7 @@ impl Assistant {
 
         let messages = vec![system_prompt, user_message]; // No history for command generation to keep it focused
 
-        let response = self.provider.chat_completion(messages, None).await?;
+        let response = self.try_chat_completion(messages, None).await?;
         // Do NOT add to conversation history, as this is a specific command generation, not general chat.
         Ok(response.content.unwrap_or_default().trim().to_string()) // Trim to remove any leading/trailing whitespace
     }
@@ -131,7 +213,7 @@ impl Assistant {
         };
 
         let messages = vec![system_prompt, user_message];
-        let response = self.provider.chat_completion(messages, None).await?;
+        let response = self.try_chat_completion(messages, None).await?;
         Ok(response.content.unwrap_or_default())
     }
 
@@ -147,7 +229,7 @@ impl Assistant {
         };
 
         let messages = vec![system_prompt, user_message];
-        let response = self.provider.chat_completion(messages, None).await?;
+        let response = self.try_chat_completion(messages, None).await?;
         
         let yaml_content = response.content.unwrap_or_default();
         log::debug!("AI inferred workflow YAML:\n{}", yaml_content);

@@ -277,9 +277,12 @@ impl Application for NeoTerm {
 
         // Initialize AI Assistant first
         let ai_assistant = Arc::new(RwLock::new(Assistant::new(
-            &agent_config.provider_type,
-            agent_config.api_key.clone(),
-            agent_config.model.clone(),
+            &config.preferences.ai_provider_type,
+            config.preferences.ai_api_key.clone(),
+            config.preferences.ai_model.clone(),
+            config.preferences.fallback_ai_provider_type.clone(), // Pass fallback provider type
+            None, // Fallback API key is not currently stored in preferences, assuming same as primary or none
+            config.preferences.fallback_ai_model.clone(), // Pass fallback model
         ).unwrap()));
 
         // Then initialize AgentMode with the assistant
@@ -1195,6 +1198,9 @@ impl App {
             &preferences.ai_provider_type,
             preferences.ai_api_key.clone(),
             preferences.ai_model.clone(),
+            preferences.fallback_ai_provider_type.clone(),
+            None, // Fallback API key is not currently stored in preferences, assuming same as primary or none
+            preferences.fallback_ai_model.clone(),
         )?));
         // No explicit init for Assistant, its internal components are ready on new()
 

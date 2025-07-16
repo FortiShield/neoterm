@@ -45,6 +45,8 @@ pub struct UserPreferences {
     pub ai_temperature: f32,
     pub ai_max_tokens: u32,
     pub ai_provider_type: String, // New field for AI provider type
+    pub fallback_ai_provider_type: Option<String>, // New: Fallback AI provider type
+    pub fallback_ai_model: Option<String>, // New: Fallback AI model
     pub keybindings_file: String,
     pub enable_performance_profiling: bool,
     pub enable_wasm_plugins: bool,
@@ -292,6 +294,8 @@ impl Default for UserPreferences {
             ai_temperature: 0.7,
             ai_max_tokens: 500,
             ai_provider_type: "openai".to_string(), // Default to OpenAI
+            fallback_ai_provider_type: Some("ollama".to_string()), // Default fallback to Ollama
+            fallback_ai_model: Some("llama2".to_string()), // Default fallback model
             keybindings_file: "keybindings.yaml".to_string(),
             enable_performance_profiling: true,
             enable_wasm_plugins: true,
