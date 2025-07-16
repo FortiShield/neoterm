@@ -133,10 +133,13 @@ base64 = "0.22"
 async-recursion = "1.1"
 once_cell = "1.19"
 semver = "1.0"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] } # Added for CLI integration
 
-# For AI integration
-openai-api = "0.1.0" # A simple OpenAI client, replace with a more robust one if needed
+# Packaging tools (these are typically cargo subcommands or external tools)
+# For .deb: cargo install cargo-deb
+# For .rpm: cargo install cargo-rpm
+# For .msi: cargo install cargo-wix
+# For AppImage/macOS .dmg: cargo install cargo-bundle (or custom scripts)
 
 [profile.release]
 strip = true

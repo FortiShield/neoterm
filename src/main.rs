@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use futures_util::StreamExt; // For consuming reqwest response stream
 use chrono::{DateTime, Local};
+use clap::Parser; // Import Parser for CLI
 
 mod block; // Updated import path
 mod shell;
@@ -42,6 +43,7 @@ mod lpc;
 mod mcq;
 mod markdown_parser;
 mod api; // New API module
+mod cli; // New CLI module
 
 use block::{Block, BlockContent}; // Updated import
 use shell::ShellManager;
@@ -59,6 +61,7 @@ use crate::{
     collaboration::session_sharing::SessionSharingManager,
     cloud::sync_manager::CloudSyncManager,
     performance::benchmarks::{PerformanceBenchmarks, BenchmarkSuite}, // Import BenchmarkSuite
+    cli::{Cli, Commands, ConfigCommands}, // Import CLI components
 };
 
 #[derive(Debug, Clone)]
@@ -669,8 +672,54 @@ impl PtyMessage {
 }
 
 fn main() -> iced::Result {
-    NeoTerm::run(Settings {
-        antialiasing: true,
-        ..Settings::default()
-    })
+    let cli = Cli::parse();
+
+    if let Some(command) = cli.command {
+        // Handle CLI commands
+        match command {
+            Commands::Exec { command, args } => {
+                println!("Executing command: {} with args: {:?}", command, args);
+                // In a real application, you'd execute this command via PtyManager
+                // and wait for its completion, then print output.
+                // For this example, we'll just simulate.
+                println!("(Simulated) Command executed successfully.");
+                std::process::exit(0);
+            },
+            Commands::Workflow { name_or_id, args } => {
+                println!("Running workflow: {} with args: {:?}", name_or_id, args);
+                // In a real application, you'd trigger the workflow manager here.
+                println!("(Simulated) Workflow completed.");
+                std::process::exit(0);
+            },
+            Commands::Config { action } => {
+                match action {
+                    ConfigCommands::Get { key } => println!("(Simulated) Getting config key: {}", key),
+                    ConfigCommands::Set { key, value } => println!("(Simulated) Setting config key: {} to {}", key, value),
+                    ConfigCommands::List => println!("(Simulated) Listing all config keys."),
+                }
+                std::process::exit(0);
+            },
+            Commands::Benchmark => {
+                println!("Running performance benchmarks...");
+                // In a real application, you'd run PerformanceBenchmarks::new().run_all_benchmarks().await
+                // and print the summary.
+                println!("(Simulated) Benchmarks completed. Results: ...");
+                std::process::exit(0);
+            },
+            Commands::ApiServer { port } => {
+                println!("Starting API server on port {}...", port);
+                // In a real application, you'd start the warp server here.
+                // This would typically block indefinitely.
+                println!("(Simulated) API server started.");
+                // For demonstration, we'll exit immediately. In a real app, this would be a long-running task.
+                std::process::exit(0);
+            },
+        }
+    } else {
+        // No CLI command, run the GUI application
+        NeoTerm::run(Settings {
+            antialiasing: true,
+            ..Settings::default()
+        })
+    }
 }
