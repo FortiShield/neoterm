@@ -1,5 +1,7 @@
 use iced::{Element, widget::{text_input, column, row, container, button, text}};
-use std::collections::VecDeque;
+use iced::keyboard::{self, KeyCode, Modifiers};
+use iced::{keyboard::Event as KeyEvent, Event as IcedEvent};
+use std::collections::{VecDeque, HashMap};
 
 #[derive(Debug, Clone)]
 pub struct EnhancedTextInput {
@@ -73,6 +75,9 @@ pub enum Message {
     NavigateSuggestions(Direction),
     ApplySuggestion,
     HistoryNavigated(HistoryDirection),
+    CommandPaletteToggle,
+    AISidebarToggle,
+    RunBenchmark,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +90,73 @@ pub enum Direction {
 pub enum HistoryDirection {
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Keybinding {
+    Single(KeyCode, Modifiers),
+    Chord(KeyCode, Modifiers, KeyCode, Modifiers), // e.g., Ctrl+K, Ctrl+L
+}
+
+pub struct InputHandler {
+    keybindings: HashMap<Keybinding, Message>,
+    // State for chord detection if needed
+    // last_key_event: Option<KeyEvent>,
+}
+
+impl InputHandler {
+    pub fn new() -> Self {
+        let mut handler = Self {
+            keybindings: HashMap::new(),
+            // last_key_event: None,
+        };
+        handler.setup_default_keybindings();
+        handler
+    }
+
+    fn setup_default_keybindings(&mut self) {
+        self.keybindings.insert(
+            Keybinding::Single(KeyCode::P, Modifiers::COMMAND), // Cmd+P on macOS, Ctrl+P on others
+            Message::CommandPaletteToggle,
+        );
+        self.keybindings.insert(
+            Keybinding::Single(KeyCode::A, Modifiers::COMMAND), // Cmd+A on macOS, Ctrl+A on others
+            Message::AISidebarToggle,
+        );
+        self.keybindings.insert(
+            Keybinding::Single(KeyCode::F1, Modifiers::NONE),
+            Message::RunBenchmark,
+        );
+        // Add more default keybindings here
+    }
+
+    pub fn process_iced_event(&self, event: &IcedEvent) -> Option<Message> {
+        match event {
+            IcedEvent::Keyboard(key_event) => self.process_keyboard_event(key_event),
+            IcedEvent::Mouse(mouse_event) => Some(Message::Mouse(mouse_event.clone())),
+            IcedEvent::Text(text) => Some(Message::Text(text.clone())),
+            _ => None,
+        }
+    }
+
+    fn process_keyboard_event(&self, event: &KeyEvent) -> Option<Message> {
+        match event {
+            KeyEvent::KeyPressed { key_code, modifiers, .. } => {
+                let current_keybinding = Keybinding::Single(*key_code, *modifiers);
+                self.keybindings.get(&current_keybinding).cloned()
+            }
+            // Handle KeyReleased or other keyboard events if necessary
+            _ => None,
+        }
+    }
+
+    pub fn register_keybinding(&mut self, keybinding: Keybinding, message: Message) {
+        self.keybindings.insert(keybinding, message);
+    }
+
+    pub fn remove_keybinding(&mut self, keybinding: &Keybinding) {
+        self.keybindings.remove(keybinding);
+    }
 }
 
 impl EnhancedTextInput {
@@ -152,6 +224,15 @@ impl EnhancedTextInput {
                     self.suggestions.clear(); // Clear suggestions when navigating history
                     self.active_suggestion = None;
                 }
+            }
+            Message::CommandPaletteToggle => {
+                // Handle command palette toggle
+            }
+            Message::AISidebarToggle => {
+                // Handle AI sidebar toggle
+            }
+            Message::RunBenchmark => {
+                // Handle run benchmark
             }
         }
     }
@@ -421,4 +502,8 @@ impl EnhancedTextInput {
 
         column![input_with_prompt, suggestions_view].spacing(4).into()
     }
+}
+
+pub fn init() {
+    println!("input module loaded");
 }

@@ -1,31 +1,35 @@
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 use async_trait::async_trait;
 use chrono::Utc;
 use crate::agent_mode_eval::ai_client::{AIClient, OpenAIClient, AIClientError, AIStreamChunk};
-use crate::block::Block as UIBlock; // Alias to avoid conflict with Message
+use crate::block::{Block as UIBlock, Block, BlockContent, BlockId, BlockType}; // Alias to avoid conflict with Message
+use crate::command::CommandExecutor;
+use crate::config::Config;
+use crate::agent_mode_eval::conversation::{Conversation, Message, MessageRole};
+use crate::agent_mode_eval::tools::{Tool, ToolRegistry, ToolCall, ToolResult};
 
 pub mod ai_client;
 pub mod conversation;
 pub mod tools;
 
-pub use ai_client::{AIClient, AiConfig, AiProvider, Message, MessageRole};
+pub use ai_client::{AIClient, AiConfig, AiProvider, Message as AiClientMessage, MessageRole as AiClientMessageRole};
 pub use conversation::{Conversation, ConversationManager};
 pub use tools::{Tool, ToolManager, ToolResult as ToolExecutionResult, ToolCall as AgentToolCall};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    pub ai_config: ai_client::AIClientConfig,
+    pub ai_config: AiConfig,
     pub max_history_length: usize,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            ai_config: ai_client::AIClientConfig::OpenAI { api_key: None },
+            ai_config: AiConfig::OpenAI { api_key: None },
             max_history_length: 10,
         }
     }
@@ -33,249 +37,284 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone)]
 pub enum AgentMessage {
-    UserMessage(String),
-    AgentResponse(String),
-    ToolCall(AgentToolCall),
-    ToolResult(String),
-    SystemMessage(String),
+    Text(String),
+    ToolCall(ToolCall),
+    ToolResult(ToolResult),
     Error(String),
-    Done, // Indicates the AI conversation turn is complete
+    Done,
 }
 
-#[derive(Debug, Clone)]
 pub struct AgentMode {
-    is_enabled: bool,
-    client: Box<dyn AIClient + Send + Sync>,
-    conversation_history: VecDeque<Message>, // Stores ai_client::Message for full context
-    config: AgentConfig,
-    tool_registry: tools::ToolRegistry,
+    config: AiConfig,
+    ai_client: AIClient,
+    tool_registry: ToolRegistry,
+    current_conversation: Conversation,
+    command_executor: CommandExecutor,
+    // Channel to send messages back to the main application loop
+    message_sender: mpsc::UnboundedSender<AgentMessage>,
 }
 
 impl AgentMode {
-    pub fn new(config: AgentConfig) -> Result<Self, AIClientError> {
-        let client: Box<dyn AIClient + Send + Sync> = match &config.ai_config {
-            ai_client::AIClientConfig::OpenAI { api_key } => {
-                let key = api_key.clone().ok_or(AIClientError::ConfigurationError("OpenAI API key not provided".to_string()))?;
-                Box::new(OpenAIClient::new(key, "gpt-4o".to_string())) // Default model for OpenAIClient
-            }
-            // Add other AI clients here
-        };
+    pub fn new(config: AiConfig, command_executor: CommandExecutor, message_sender: mpsc::UnboundedSender<AgentMessage>) -> Result<Self, Box<dyn std::error::Error>> {
+        let ai_client = AIClient::new(config.clone())?;
+        let tool_registry = ToolRegistry::new();
+
+        // Register default tools
+        tool_registry.register_tool(Tool::new(
+            "read_file".to_string(),
+            "Reads the content of a file from the file system.".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the file to read."
+                    }
+                },
+                "required": ["path"]
+            }),
+            |args| {
+                Box::pin(async move {
+                    let path = args["path"].as_str().ok_or("Missing 'path' argument")?.to_string();
+                    tokio::fs::read_to_string(&path)
+                        .await
+                        .map_err(|e| format!("Failed to read file {}: {}", path, e))
+                })
+            },
+        ))?;
+
+        tool_registry.register_tool(Tool::new(
+            "list_dir".to_string(),
+            "Lists the contents of a directory.".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the directory to list."
+                    }
+                },
+                "required": ["path"]
+            }),
+            |args| {
+                Box::pin(async move {
+                    let path = args["path"].as_str().ok_or("Missing 'path' argument")?.to_string();
+                    let mut entries = Vec::new();
+                    let mut dir = tokio::fs::read_dir(&path).await
+                        .map_err(|e| format!("Failed to read directory {}: {}", path, e))?;
+                    
+                    while let Some(entry) = dir.next_entry().await.map_err(|e| format!("Failed to read directory entry: {}", e))? {
+                        entries.push(entry.file_name().to_string_lossy().into_owned());
+                    }
+                    Ok(entries.join("\n"))
+                })
+            },
+        ))?;
+
+        // Add a tool for executing shell commands
+        let cmd_executor_clone = command_executor.clone();
+        tool_registry.register_tool(Tool::new(
+            "execute_command".to_string(),
+            "Executes a shell command and returns its output.".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Arguments for the command."
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": "Optional working directory for the command."
+                    }
+                },
+                "required": ["command"]
+            }),
+            move |args| {
+                let executor_clone = cmd_executor_clone.clone();
+                Box::pin(async move {
+                    let command = args["command"].as_str().ok_or("Missing 'command' argument")?.to_string();
+                    let args_vec: Vec<String> = args["args"].as_array()
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    let working_directory = args["working_directory"].as_str().map(String::from);
+
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    let _ = executor_clone.execute_command(&command, &args_vec, working_directory, tx);
+
+                    let mut output = String::new();
+                    while let Some(msg) = rx.recv().await {
+                        output.push_str(&msg);
+                    }
+                    Ok(output)
+                })
+            },
+        ))?;
+
 
         Ok(Self {
-            is_enabled: false,
-            client,
-            conversation_history: VecDeque::new(),
             config,
-            tool_registry: tools::ToolRegistry::new(),
+            ai_client,
+            tool_registry,
+            current_conversation: Conversation::new("New AI Conversation".to_string()),
+            command_executor,
+            message_sender,
         })
     }
 
-    pub fn toggle(&mut self) -> bool {
-        self.is_enabled = !self.is_enabled;
-        self.is_enabled
+    pub fn update_config(&mut self, config: AiConfig) {
+        self.config = config.clone();
+        self.ai_client.update_config(config);
     }
 
-    pub fn is_enabled(&self) -> bool {
-        self.is_enabled
+    pub fn get_config(&self) -> &AiConfig {
+        self.ai_client.get_config()
     }
 
-    pub fn start_conversation(&mut self) -> Result<(), AIClientError> {
-        self.conversation_history.clear();
-        self.conversation_history.push_back(Message {
-            id: Uuid::new_v4(),
-            role: MessageRole::System,
-            content: self.config.ai_config.get_system_prompt().unwrap_or_else(|| "You are a helpful terminal assistant. Provide concise answers and command suggestions.".to_string()),
-            timestamp: Utc::now(),
-            tool_calls: None,
-            tool_results: None,
-        });
-        Ok(())
+    pub fn get_conversation(&self) -> &Conversation {
+        &self.current_conversation
     }
 
-    pub async fn send_message(&mut self, user_message: String, context_blocks: Vec<UIBlock>) -> Result<mpsc::Receiver<AgentMessage>, AIClientError> {
-        let (tx, rx) = mpsc::channel(100);
-        let client_clone = self.client.clone_box();
-        let tool_registry_clone = self.tool_registry.clone();
-        let mut conversation_history_for_task = self.conversation_history.clone(); // Clone for the async task
+    pub fn start_new_conversation(&mut self, title: String) {
+        self.current_conversation = Conversation::new(title);
+    }
 
-        // Add user message to history
-        conversation_history_for_task.push_back(Message {
-            id: Uuid::new_v4(),
-            role: MessageRole::User,
-            content: user_message.clone(),
-            timestamp: Utc::now(),
-            tool_calls: None,
-            tool_results: None,
-        });
-        self.trim_history(&mut conversation_history_for_task);
+    pub async fn send_message(&mut self, user_input: String, context_blocks: Vec<Block>) {
+        let mut messages = self.current_conversation.messages.clone();
 
-        // Add contextual blocks to the conversation for the AI
-        for block in context_blocks {
-            let context_content = match block.content {
-                crate::block::BlockContent::Command { input, output, status, .. } => {
-                    let output_str = output.iter().map(|(s, _)| s.clone()).collect::<Vec<String>>().join("\n");
-                    format!("Previous command: `{}`\nOutput:\n\`\`\`\n{}\n\`\`\`\nStatus: {}", input, output_str, status)
-                },
-                crate::block::BlockContent::AgentMessage { content, is_user, .. } => {
-                    format!("Previous {}: {}", if is_user { "User" } else { "Agent" }, content)
-                },
-                crate::block::BlockContent::Info { title, message, .. } => {
-                    format!("Info ({}): {}", title, message)
-                },
-                crate::block::BlockContent::Error { message, .. } => {
-                    format!("Error: {}", message)
-                },
-            };
-            conversation_history_for_task.push_back(Message {
-                id: Uuid::new_v4(),
-                role: MessageRole::System, // Using System role for context
-                content: format!("Context from previous block:\n{}", context_content),
-                timestamp: Utc::now(),
-                tool_calls: None,
-                tool_results: None,
-            });
+        // Add system prompt if configured and not already present
+        if let Some(system_prompt) = &self.config.system_prompt {
+            if !messages.iter().any(|m| m.role == MessageRole::System) {
+                messages.insert(0, Message::new(MessageRole::System, system_prompt.clone()));
+            }
         }
 
-        let tools_for_ai = tool_registry_clone.get_available_tools();
+        // Add contextual blocks to the user message
+        let mut full_user_content = user_input;
+        if !context_blocks.is_empty() {
+            full_user_content.push_str("\n\n--- Contextual Information ---\n");
+            for block in context_blocks {
+                full_user_content.push_str(&format!("\nBlock ID: {}\nType: {:?}\nContent:\n\`\`\`\n{}\n\`\`\`\n",
+                    block.id, block.block_type, block.content.to_string()));
+            }
+            full_user_content.push_str("----------------------------\n");
+        }
 
-        tokio::spawn(async move {
-            let mut current_agent_response_text = String::new();
-            let mut tool_calls_to_execute: Vec<AgentToolCall> = Vec::new();
+        messages.push(Message::new(MessageRole::User, full_user_content));
+        self.current_conversation.add_message(messages.last().unwrap().clone()); // Add user message to conversation history
 
-            // Loop for multi-turn interactions (AI -> Tool -> AI)
-            loop {
-                let stream_result = client_clone.stream_response(conversation_history_for_task.clone().into(), Some(tools_for_ai.clone())).await;
+        let tools = if self.config.tools_enabled {
+            Some(self.tool_registry.get_all_tools())
+        } else {
+            None
+        };
 
-                match stream_result {
-                    Ok(mut stream) => {
-                        let mut stream_finished = false;
-                        while let Some(chunk_result) = stream.next().await {
-                            match chunk_result {
-                                Ok(chunk) => {
-                                    match chunk {
-                                        AIStreamChunk::Text(text_chunk) => {
-                                            current_agent_response_text.push_str(&text_chunk);
-                                            if let Err(_) = tx.send(AgentMessage::AgentResponse(text_chunk)).await {
-                                                eprintln!("Failed to send text chunk to UI");
-                                                return;
-                                            }
-                                        },
-                                        AIStreamChunk::ToolCall(tool_calls) => {
-                                            tool_calls_to_execute.extend(tool_calls);
-                                            // Send tool calls to UI immediately
-                                            for tc in &tool_calls_to_execute {
-                                                if let Err(_) = tx.send(AgentMessage::ToolCall(tc.clone())).await {
-                                                    eprintln!("Failed to send tool call to UI");
-                                                    return;
-                                                }
-                                            }
-                                        },
-                                        AIStreamChunk::Done => {
-                                            stream_finished = true;
-                                            break; // Stream finished
-                                        },
-                                    }
-                                },
-                                Err(e) => {
-                                    eprintln!("Error streaming AI response: {}", e);
-                                    if let Err(_) = tx.send(AgentMessage::Error(format!("AI Stream Error: {}", e))).await {
-                                        eprintln!("Failed to send error to UI");
-                                    }
-                                    return;
-                                }
-                            }
-                        }
+        let mut assistant_response_text = String::new();
+        let mut tool_calls_to_execute: Vec<ToolCall> = Vec::new();
+        let mut iteration_count = 0;
+        const MAX_ITERATIONS: usize = 5; // Prevent infinite loops
 
-                        // After stream finishes, add the AI's response (if any) to history
-                        if !current_agent_response_text.is_empty() {
-                            conversation_history_for_task.push_back(Message {
-                                id: Uuid::new_v4(),
-                                role: MessageRole::Assistant,
-                                content: current_agent_response_text.clone(),
-                                timestamp: Utc::now(),
-                                tool_calls: None,
-                                tool_results: None,
-                            });
-                            current_agent_response_text.clear();
-                        }
+        loop {
+            iteration_count += 1;
+            if iteration_count > MAX_ITERATIONS {
+                let _ = self.message_sender.send(AgentMessage::Error("Agent mode reached max iterations without a final response.".to_string()));
+                break;
+            }
 
-                        // Check for tool calls to execute
-                        if !tool_calls_to_execute.is_empty() {
-                            let mut tool_results_for_ai: Vec<ai_client::ToolResult> = Vec::new();
-                            for tc in tool_calls_to_execute.drain(..) {
-                                let tool_result = tool_registry_clone.execute_tool(tc.clone()).await;
-                                match tool_result {
-                                    Ok(tr) => {
-                                        tool_results_for_ai.push(ai_client::ToolResult {
-                                            tool_call_id: tc.id.clone(),
-                                            content: tr.output.clone(),
-                                            is_error: !tr.success,
-                                        });
-                                        if let Err(_) = tx.send(AgentMessage::ToolResult(tr.output)).await {
-                                            eprintln!("Failed to send tool result to UI");
-                                            return;
+            let ai_stream_result = self.ai_client.stream_response(messages.clone(), tools.clone()).await;
+
+            match ai_stream_result {
+                Ok(mut stream) => {
+                    assistant_response_text.clear();
+                    tool_calls_to_execute.clear();
+                    let mut received_done = false;
+
+                    while let Some(chunk_result) = stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                match chunk {
+                                    AIStreamChunk::Text(text) => {
+                                        assistant_response_text.push_str(&text);
+                                        let _ = self.message_sender.send(AgentMessage::Text(text));
+                                    },
+                                    AIStreamChunk::ToolCall(calls) => {
+                                        for call in calls {
+                                            tool_calls_to_execute.push(call.clone());
+                                            let _ = self.message_sender.send(AgentMessage::ToolCall(call));
                                         }
                                     },
-                                    Err(e) => {
-                                        let error_msg = format!("Tool execution error: {}", e);
-                                        tool_results_for_ai.push(ai_client::ToolResult {
-                                            tool_call_id: tc.id.clone(),
-                                            content: error_msg.clone(),
-                                            is_error: true,
-                                        });
-                                        if let Err(_) = tx.send(AgentMessage::Error(error_msg)).await {
-                                            eprintln!("Failed to send tool error to UI");
-                                            return;
-                                        }
-                                    }
+                                    AIStreamChunk::Done => {
+                                        received_done = true;
+                                        break; // End of AI response for this turn
+                                    },
                                 }
                             }
-
-                            // Add tool results to the conversation for the next AI turn
-                            conversation_history_for_task.push_back(Message {
-                                id: Uuid::new_v4(),
-                                role: MessageRole::Tool,
-                                content: "".to_string(), // Content is empty for tool results, actual content is in tool_results field
-                                timestamp: Utc::now(),
-                                tool_calls: None,
-                                tool_results: Some(tool_results_for_ai),
-                            });
-
-                            // Continue the loop for another AI turn
-                            continue; // Go to the next iteration of the loop
-                        } else {
-                            // No tool calls, AI response is complete
-                            if stream_finished {
-                                let _ = tx.send(AgentMessage::Done);
-                                break; // Exit the loop
+                            Err(e) => {
+                                let _ = self.message_sender.send(AgentMessage::Error(format!("AI Stream Error: {}", e)));
+                                received_done = true; // Treat stream error as end of response
+                                break;
                             }
                         }
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to get AI stream: {}", e);
-                        if let Err(_) = tx.send(AgentMessage::Error(format!("AI Client Error: {}", e))).await {
-                            eprintln!("Failed to send error to UI");
+                    }
+
+                    // After receiving all chunks for this turn
+                    if !assistant_response_text.is_empty() {
+                        self.current_conversation.add_message(Message::new(MessageRole::Assistant, assistant_response_text.clone()));
+                    }
+
+                    if !tool_calls_to_execute.is_empty() {
+                        // Add the tool calls to the conversation history
+                        self.current_conversation.add_message(Message::new_tool_call(tool_calls_to_execute.clone()));
+
+                        // Execute tools and prepare results
+                        let mut tool_results_for_next_turn: Vec<Message> = Vec::new();
+                        for tool_call in tool_calls_to_execute.drain(..) {
+                            let tool_result = self.tool_registry.execute_tool(&tool_call).await;
+                            match tool_result {
+                                Ok(output) => {
+                                    let result_msg = Message::new_tool_result(tool_call.id.clone(), output, false);
+                                    let _ = self.message_sender.send(AgentMessage::ToolResult(result_msg.tool_results.as_ref().unwrap()[0].clone()));
+                                    tool_results_for_next_turn.push(result_msg);
+                                }
+                                Err(e) => {
+                                    let result_msg = Message::new_tool_result(tool_call.id.clone(), e.to_string(), true);
+                                    let _ = self.message_sender.send(AgentMessage::ToolResult(result_msg.tool_results.as_ref().unwrap()[0].clone()));
+                                    tool_results_for_next_turn.push(result_msg);
+                                }
+                            }
                         }
-                        return;
+                        // Add tool results to messages for the next AI turn
+                        messages.extend(tool_results_for_next_turn);
+                        self.current_conversation.messages.extend(tool_results_for_next_turn); // Add to conversation history
+                        // Continue loop to send tool results back to AI
+                    } else if received_done {
+                        // If AI sent text and then Done, or just Done without tool calls, we are finished.
+                        let _ = self.message_sender.send(AgentMessage::Done);
+                        break;
+                    } else {
+                        // This case should ideally not be reached if AI sends Done, but as a safeguard
+                        let _ = self.message_sender.send(AgentMessage::Error("Unexpected state: AI response ended without Done or tool calls.".to_string()));
+                        break;
                     }
                 }
+                Err(e) => {
+                    let _ = self.message_sender.send(AgentMessage::Error(format!("AI Client Error: {}", e)));
+                    break;
+                }
             }
-        });
-
-        Ok(rx)
-    }
-
-    fn trim_history(&self, history: &mut VecDeque<Message>) {
-        while history.len() > self.config.max_history_length {
-            history.pop_front();
         }
     }
 }
 
-impl ai_client::AIClientConfig {
+impl AiConfig {
     pub fn get_system_prompt(&self) -> Option<String> {
         match self {
-            ai_client::AIClientConfig::OpenAI { .. } => Some("You are a helpful terminal assistant. Provide concise answers and command suggestions. When suggesting commands, use the `execute_command` tool. When asked to read or write files, use `read_file` or `write_file` tools. When asked about system information, use `get_system_info`.".to_string()),
+            AiConfig::OpenAI { .. } => Some("You are a helpful terminal assistant. Provide concise answers and command suggestions. When suggesting commands, use the `execute_command` tool. When asked to read or write files, use `read_file` or `write_file` tools. When asked about system information, use `get_system_info`.".to_string()),
             // Add system prompts for other providers if needed
         }
     }
@@ -301,18 +340,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_mode_creation() {
-        let config = AgentConfig::default();
-        let agent = AgentMode::new(config);
+        let config = AiConfig::default();
+        let command_executor = CommandExecutor::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let agent = AgentMode::new(config, command_executor, tx);
         assert!(agent.is_ok());
     }
 
     #[tokio::test]
     async fn test_conversation_lifecycle() {
-        let config = AgentConfig::default();
-        let mut agent = AgentMode::new(config).unwrap();
+        let config = AiConfig::default();
+        let command_executor = CommandExecutor::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut agent = AgentMode::new(config, command_executor, tx).unwrap();
         
-        let result = agent.start_conversation();
-        assert!(result.is_ok());
+        agent.start_new_conversation("Test Conversation".to_string());
         
         // Test sending a message and receiving a stream
         // This test would require mocking the AIClient for a true unit test

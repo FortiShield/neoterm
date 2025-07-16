@@ -6,77 +6,83 @@ use iced;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlTheme {
     pub name: String,
-    pub colors: YamlColors,
-    // Add other theme properties like fonts, etc.
-    pub font: Option<FontConfig>,
-    pub effects: Option<EffectConfig>,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub colors: YamlThemeColors,
+    #[serde(default)]
+    pub syntax_highlighting: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct YamlColors {
+pub struct YamlThemeColors {
     pub background: String,
     pub foreground: String,
-    pub primary: String,
-    pub secondary: String,
-    pub danger: String,
-    pub text: String,
-    pub border: String,
-    // Add more specific colors if needed (e.g., syntax highlighting colors)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalColors {
-    pub normal: AnsiColorSet,
-    pub bright: AnsiColorSet,
-    
-    // Optional 256-color palette
-    pub palette: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnsiColorSet {
+    pub cursor: String,
+    pub selection: String,
+    #[serde(default)]
     pub black: String,
+    #[serde(default)]
     pub red: String,
+    #[serde(default)]
     pub green: String,
+    #[serde(default)]
     pub yellow: String,
+    #[serde(default)]
     pub blue: String,
+    #[serde(default)]
     pub magenta: String,
+    #[serde(default)]
     pub cyan: String,
+    #[serde(default)]
     pub white: String,
+    #[serde(default)]
+    pub bright_black: String,
+    #[serde(default)]
+    pub bright_red: String,
+    #[serde(default)]
+    pub bright_green: String,
+    #[serde(default)]
+    pub bright_yellow: String,
+    #[serde(default)]
+    pub bright_blue: String,
+    #[serde(default)]
+    pub bright_magenta: String,
+    #[serde(default)]
+    pub bright_cyan: String,
+    #[serde(default)]
+    pub bright_white: String,
+    // Additional custom colors can be added here
+    #[serde(flatten)]
+    pub custom: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UiColors {
-    pub primary: Option<String>,
-    pub secondary: Option<String>,
-    pub success: Option<String>,
-    pub warning: Option<String>,
-    pub error: Option<String>,
-    pub info: Option<String>,
-    pub surface: Option<String>,
-    pub surface_variant: Option<String>,
-    pub outline: Option<String>,
-    pub shadow: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FontConfig {
-    pub family: Option<String>,
-    pub size: Option<f32>,
-    pub weight: Option<String>, // "normal", "bold", "light", etc.
-    pub style: Option<String>,  // "normal", "italic"
-    pub line_height: Option<f32>,
-    pub letter_spacing: Option<f32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EffectConfig {
-    pub border_radius: Option<f32>,
-    pub shadow_blur: Option<f32>,
-    pub shadow_offset: Option<(f32, f32)>,
-    pub transparency: Option<f32>,
-    pub blur: Option<bool>,
-    pub animations: Option<bool>,
+impl Default for YamlThemeColors {
+    fn default() -> Self {
+        // Default values for standard ANSI colors if not specified in YAML
+        YamlThemeColors {
+            background: "#000000".to_string(),
+            foreground: "#FFFFFF".to_string(),
+            cursor: "#FFFFFF".to_string(),
+            selection: "#555555".to_string(),
+            black: "#000000".to_string(),
+            red: "#CD3131".to_string(),
+            green: "#0BCB0B".to_string(),
+            yellow: "#E5E510".to_string(),
+            blue: "#2472C8".to_string(),
+            magenta: "#BC3FBC".to_string(),
+            cyan: "#0ADBBF".to_string(),
+            white: "#E5E5E5".to_string(),
+            bright_black: "#666666".to_string(),
+            bright_red: "#F14C4C".to_string(),
+            bright_green: "#17A717".to_string(),
+            bright_yellow: "#F5F543".to_string(),
+            bright_blue: "#3B8EEA".to_string(),
+            bright_magenta: "#D670D6".to_string(),
+            bright_cyan: "#1ADCEF".to_string(),
+            bright_white: "#FFFFFF".to_string(),
+            custom: HashMap::new(),
+        }
+    }
 }
 
 impl YamlTheme {
@@ -120,42 +126,42 @@ impl YamlTheme {
             
             terminal_background: parse_color(&self.colors.background)?,
             terminal_foreground: parse_color(&self.colors.foreground)?,
-            terminal_cursor: parse_color(&self.colors.primary).unwrap_or_default(),
-            terminal_selection: parse_color(&self.colors.secondary).unwrap_or_default(),
+            terminal_cursor: parse_color(&self.colors.cursor).unwrap_or_default(),
+            terminal_selection: parse_color(&self.colors.selection).unwrap_or_default(),
             
             ansi_colors: AnsiColors {
-                black: parse_color(&self.colors.background)?,
-                red: parse_color(&self.colors.danger)?,
-                green: parse_color(&self.colors.success)?,
-                yellow: parse_color(&self.colors.warning)?,
-                blue: parse_color(&self.colors.primary)?,
-                magenta: parse_color(&self.colors.secondary)?,
-                cyan: parse_color(&self.colors.text)?,
-                white: parse_color(&self.colors.foreground)?,
+                black: parse_color(&self.colors.black)?,
+                red: parse_color(&self.colors.red)?,
+                green: parse_color(&self.colors.green)?,
+                yellow: parse_color(&self.colors.yellow)?,
+                blue: parse_color(&self.colors.blue)?,
+                magenta: parse_color(&self.colors.magenta)?,
+                cyan: parse_color(&self.colors.cyan)?,
+                white: parse_color(&self.colors.white)?,
                 
-                bright_black: parse_color(&self.colors.background)?,
-                bright_red: parse_color(&self.colors.danger)?,
-                bright_green: parse_color(&self.colors.success)?,
-                bright_yellow: parse_color(&self.colors.warning)?,
-                bright_blue: parse_color(&self.colors.primary)?,
-                bright_magenta: parse_color(&self.colors.secondary)?,
-                bright_cyan: parse_color(&self.colors.text)?,
-                bright_white: parse_color(&self.colors.foreground)?,
+                bright_black: parse_color(&self.colors.bright_black)?,
+                bright_red: parse_color(&self.colors.bright_red)?,
+                bright_green: parse_color(&self.colors.bright_green)?,
+                bright_yellow: parse_color(&self.colors.bright_yellow)?,
+                bright_blue: parse_color(&self.colors.bright_blue)?,
+                bright_magenta: parse_color(&self.colors.bright_magenta)?,
+                bright_cyan: parse_color(&self.colors.bright_cyan)?,
+                bright_white: parse_color(&self.colors.bright_white)?,
             },
             
-            primary: parse_color(&self.colors.primary)?,
-            secondary: parse_color(&self.colors.secondary)?,
-            accent: parse_color(&self.colors.primary)?,
-            success: parse_color(&self.colors.success)?,
-            warning: parse_color(&self.colors.warning)?,
-            error: parse_color(&self.colors.danger)?,
+            primary: parse_color(&self.colors.foreground)?,
+            secondary: parse_color(&self.colors.background)?,
+            accent: parse_color(&self.colors.foreground)?,
+            success: parse_color(&self.colors.green)?,
+            warning: parse_color(&self.colors.yellow)?,
+            error: parse_color(&self.colors.red)?,
             
             hover: self.derive_hover_color()?,
             active: self.derive_active_color()?,
             focus: self.derive_focus_color()?,
             disabled: self.derive_disabled_color()?,
             
-            border: parse_color(&self.colors.border)?,
+            border: parse_color(&self.colors.foreground)?,
             divider: self.derive_divider_color()?,
         };
 
@@ -202,14 +208,30 @@ impl YamlTheme {
     pub fn from_theme_config(theme: &ThemeConfig) -> Self {
         Self {
             name: theme.name.clone(),
-            colors: YamlColors {
+            author: None,
+            description: None,
+            colors: YamlThemeColors {
                 background: color_to_hex(&theme.colors.background),
                 foreground: color_to_hex(&theme.colors.text),
-                primary: color_to_hex(&theme.colors.primary),
-                secondary: color_to_hex(&theme.colors.secondary),
-                danger: color_to_hex(&theme.colors.error),
-                text: color_to_hex(&theme.colors.text),
-                border: color_to_hex(&theme.colors.border),
+                cursor: color_to_hex(&theme.colors.primary),
+                selection: color_to_hex(&theme.colors.secondary),
+                black: color_to_hex(&theme.colors.ansi_colors.black),
+                red: color_to_hex(&theme.colors.ansi_colors.red),
+                green: color_to_hex(&theme.colors.ansi_colors.green),
+                yellow: color_to_hex(&theme.colors.ansi_colors.yellow),
+                blue: color_to_hex(&theme.colors.ansi_colors.blue),
+                magenta: color_to_hex(&theme.colors.ansi_colors.magenta),
+                cyan: color_to_hex(&theme.colors.ansi_colors.cyan),
+                white: color_to_hex(&theme.colors.ansi_colors.white),
+                bright_black: color_to_hex(&theme.colors.ansi_colors.bright_black),
+                bright_red: color_to_hex(&theme.colors.ansi_colors.bright_red),
+                bright_green: color_to_hex(&theme.colors.ansi_colors.bright_green),
+                bright_yellow: color_to_hex(&theme.colors.ansi_colors.bright_yellow),
+                bright_blue: color_to_hex(&theme.colors.ansi_colors.bright_blue),
+                bright_magenta: color_to_hex(&theme.colors.ansi_colors.bright_magenta),
+                bright_cyan: color_to_hex(&theme.colors.ansi_colors.bright_cyan),
+                bright_white: color_to_hex(&theme.colors.ansi_colors.bright_white),
+                custom: HashMap::new(),
             },
             font: Some(FontConfig {
                 family: Some(theme.typography.font_family.clone()),
@@ -227,6 +249,7 @@ impl YamlTheme {
                 blur: None,
                 animations: None,
             }),
+            syntax_highlighting: HashMap::new(),
         }
     }
 
@@ -235,11 +258,23 @@ impl YamlTheme {
         // Check required fields
         parse_color(&self.colors.background).map_err(|_| YamlThemeError::InvalidColor("background".to_string()))?;
         parse_color(&self.colors.foreground).map_err(|_| YamlThemeError::InvalidColor("foreground".to_string()))?;
-        parse_color(&self.colors.primary).map_err(|_| YamlThemeError::InvalidColor("primary".to_string()))?;
-        parse_color(&self.colors.secondary).map_err(|_| YamlThemeError::InvalidColor("secondary".to_string()))?;
-        parse_color(&self.colors.danger).map_err(|_| YamlThemeError::InvalidColor("danger".to_string()))?;
-        parse_color(&self.colors.text).map_err(|_| YamlThemeError::InvalidColor("text".to_string()))?;
-        parse_color(&self.colors.border).map_err(|_| YamlThemeError::InvalidColor("border".to_string()))?;
+        parse_color(&self.colors.cursor).map_err(|_| YamlThemeError::InvalidColor("cursor".to_string()))?;
+        parse_color(&self.colors.selection).map_err(|_| YamlThemeError::InvalidColor("selection".to_string()))?;
+        parse_color(&self.colors.black).map_err(|_| YamlThemeError::InvalidColor("black".to_string()))?;
+        parse_color(&self.colors.red).map_err(|_| YamlThemeError::InvalidColor("red".to_string()))?;
+        parse_color(&self.colors.green).map_err(|_| YamlThemeError::InvalidColor("green".to_string()))?;
+        parse_color(&self.colors.yellow).map_err(|_| YamlThemeError::InvalidColor("yellow".to_string()))?;
+        parse_color(&self.colors.blue).map_err(|_| YamlThemeError::InvalidColor("blue".to_string()))?;
+        parse_color(&self.colors.magenta).map_err(|_| YamlThemeError::InvalidColor("magenta".to_string()))?;
+        parse_color(&self.colors.cyan).map_err(|_| YamlThemeError::InvalidColor("cyan".to_string()))?;
+        parse_color(&self.colors.white).map_err(|_| YamlThemeError::InvalidColor("white".to_string()))?;
+        parse_color(&self.colors.bright_black).map_err(|_| YamlThemeError::InvalidColor("bright_black".to_string()))?;
+        parse_color(&self.colors.bright_red).map_err(|_| YamlThemeError::InvalidColor("bright_red".to_string()))?;
+        parse_color(&self.colors.bright_green).map_err(|_| YamlThemeError::InvalidColor("bright_green".to_string()))?;
+        parse_color(&self.colors.bright_yellow).map_err(|_| YamlThemeError::InvalidColor("bright_yellow".to_string()))?;
+        parse_color(&self.colors.bright_blue).map_err(|_| YamlThemeError::InvalidColor("bright_blue".to_string()))?;
+        parse_color(&self.colors.bright_magenta).map_err(|_| YamlThemeError::InvalidColor("bright_magenta".to_string()))?;
+        parse_color(&self.colors.bright_white).map_err(|_| YamlThemeError::InvalidColor("bright_white".to_string()))?;
 
         Ok(())
     }
@@ -296,7 +331,7 @@ impl YamlTheme {
     }
 
     fn derive_focus_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let accent = parse_color(&self.colors.primary)?;
+        let accent = parse_color(&self.colors.foreground)?;
         Ok(ColorValue {
             a: 0.5,
             ..accent
@@ -330,11 +365,11 @@ impl YamlTheme {
         crate::config::theme::Theme {
             background: parse_hex_color(&self.colors.background).unwrap_or(iced::Color::BLACK),
             foreground: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::WHITE),
-            primary: parse_hex_color(&self.colors.primary).unwrap_or(iced::Color::BLUE),
-            secondary: parse_hex_color(&self.colors.secondary).unwrap_or(iced::Color::from_rgb8(100, 100, 100)),
-            danger: parse_hex_color(&self.colors.danger).unwrap_or(iced::Color::RED),
-            text: parse_hex_color(&self.colors.text).unwrap_or(iced::Color::BLACK),
-            border: parse_hex_color(&self.colors.border).unwrap_or(iced::Color::from_rgb8(200, 200, 200)),
+            primary: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::BLUE),
+            secondary: parse_hex_color(&self.colors.background).unwrap_or(iced::Color::from_rgb8(100, 100, 100)),
+            danger: parse_hex_color(&self.colors.red).unwrap_or(iced::Color::RED),
+            text: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::BLACK),
+            border: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::from_rgb8(200, 200, 200)),
         }
     }
 }
@@ -545,6 +580,10 @@ fn parse_hex_color_iced(hex: &str) -> Option<iced::Color> {
     }
 }
 
+pub fn init() {
+    println!("config/yaml_theme module loaded");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,14 +605,29 @@ mod tests {
     fn test_yaml_theme_conversion() {
         let yaml_str = r#"
 name: "Test Theme"
+author: "John Doe"
+description: "A simple test theme"
 colors:
   background: "#2f343f"
   foreground: "#d3dae3"
-  primary: "#009688"
-  secondary: "#61bc3b"
-  danger: "#9c3528"
-  text: "#f3b43a"
-  border: "#0d68a8"
+  cursor: "#ffffff"
+  selection: "#555555"
+  black: "#000000"
+  red: "#cd3131"
+  green: "#0bcb0b"
+  yellow: "#e5e510"
+  blue: "#2472c8"
+  magenta: "#bc3fbc"
+  cyan: "#0adbbf"
+  white: "#e5e5e5"
+  bright_black: "#666666"
+  bright_red: "#f14c4c"
+  bright_green: "#17a717"
+  bright_yellow: "#f5f543"
+  bright_blue: "#3b8eea"
+  bright_magenta: "#d670d6"
+  bright_cyan: "#1adcef"
+  bright_white: "#ffffff"
 font:
   family: "JetBrains Mono"
   size: 14.0

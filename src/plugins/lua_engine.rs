@@ -1,209 +1,152 @@
-use mlua::{Lua, Table, Function, Value as LuaValue, Result as LuaResult};
-use std::collections::HashMap;
-use serde_json::Value;
-use crate::plugins::{Plugin, PluginRuntime, Permission};
+use mlua::{Lua, Result as LuaResult, Value as LuaValue, Table, Function};
+use tokio::sync::mpsc;
+use std::sync::Arc;
+use crate::plugins::PluginEvent;
 
+/// A Lua plugin engine that can execute Lua scripts and interact with the host application.
 pub struct LuaEngine {
-    lua: Lua,
-    loaded_plugins: HashMap<String, String>, // plugin_id -> script_content
-    plugin_permissions: HashMap<String, Vec<Permission>>,
+    name: String,
+    lua: Arc<Lua>, // Use Arc for thread-safe sharing if needed
+    script_path: String,
 }
 
 impl LuaEngine {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(name: String, script_path: String) -> Self {
         let lua = Lua::new();
-        
-        // Set up sandbox environment
-        let globals = lua.globals();
-        
-        // Remove dangerous functions
-        globals.set("os", lua.create_table()?)?;
-        globals.set("io", lua.create_table()?)?;
-        globals.set("debug", lua.create_table()?)?;
-        
-        // Add safe terminal API
-        let terminal_api = lua.create_table()?;
-        
-        terminal_api.set("log", lua.create_function(|_, message: String| {
-            println!("[Lua Plugin]: {}", message);
-            Ok(())
-        })?)?;
-        
-        terminal_api.set("get_current_directory", lua.create_function(|_, ()| {
-            Ok(std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string())
-        })?)?;
-        
-        terminal_api.set("execute_command", lua.create_function(|_, command: String| {
-            // This would integrate with the actual command execution system
-            println!("[Lua Plugin] Executing: {}", command);
-            Ok("Command executed")
-        })?)?;
-        
-        globals.set("terminal", terminal_api)?;
-        
-        // Add JSON utilities
-        let json_api = lua.create_table()?;
-        
-        json_api.set("encode", lua.create_function(|_, value: LuaValue| {
-            let json_value = lua_value_to_json(value)?;
-            Ok(serde_json::to_string(&json_value).unwrap_or_default())
-        })?)?;
-        
-        json_api.set("decode", lua.create_function(|lua, json_str: String| {
-            match serde_json::from_str::<Value>(&json_str) {
-                Ok(value) => json_to_lua_value(lua, value),
-                Err(e) => Err(mlua::Error::RuntimeError(e.to_string())),
-            }
-        })?)?;
-        
-        globals.set("json", json_api)?;
-        
-        Ok(Self {
-            lua,
-            loaded_plugins: HashMap::new(),
-            plugin_permissions: HashMap::new(),
-        })
-    }
-
-    fn check_permissions(&self, plugin_id: &str, required_permission: &Permission) -> bool {
-        if let Some(permissions) = self.plugin_permissions.get(plugin_id) {
-            permissions.iter().any(|p| std::mem::discriminant(p) == std::mem::discriminant(required_permission))
-        } else {
-            false
+        Self {
+            name,
+            lua: Arc::new(lua),
+            script_path,
         }
     }
-}
 
-impl PluginRuntime for LuaEngine {
-    fn load_plugin(&mut self, plugin: &Plugin) -> Result<(), Box<dyn std::error::Error>> {
-        let script_content = std::fs::read_to_string(&plugin.install_path)?;
-        
-        // Store plugin permissions
-        self.plugin_permissions.insert(plugin.id.clone(), plugin.permissions.clone());
-        
-        // Execute the plugin script to load it
+    /// Loads and executes the Lua script.
+    pub fn load_script(&self) -> LuaResult<()> {
+        let script_content = std::fs::read_to_string(&self.script_path)
+            .map_err(|e| mlua::Error::external(format!("Failed to read Lua script: {}", e)))?;
         self.lua.load(&script_content).exec()?;
-        
-        self.loaded_plugins.insert(plugin.id.clone(), script_content);
         Ok(())
     }
 
-    fn unload_plugin(&mut self, plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.loaded_plugins.remove(plugin_id);
-        self.plugin_permissions.remove(plugin_id);
+    /// Sets up global functions/variables that Lua scripts can call to interact with the host.
+    pub fn setup_host_api(&self, event_sender: mpsc::UnboundedSender<PluginEvent>) -> LuaResult<()> {
+        let lua = &self.lua;
+        let plugin_name = self.name.clone();
+
+        // Example: `host.log(message)` function
+        let log_fn = lua.create_function(move |_, message: String| {
+            println!("[Lua Plugin: {}] {}", plugin_name, message);
+            Ok(())
+        })?;
+        lua.globals().set("log", log_fn)?;
+
+        // Example: `host.send_event(event_type, data)` function
+        let event_sender_clone = event_sender.clone();
+        let plugin_name_clone = self.name.clone();
+        let send_event_fn = lua.create_function(move |_, (event_type, data): (String, LuaValue)| {
+            let event = match event_type.as_str() {
+                "status_update" => PluginEvent::StatusUpdate(plugin_name_clone.clone(), data.to_string()),
+                "command_executed" => PluginEvent::CommandExecuted(plugin_name_clone.clone(), data.to_string()),
+                "data" => PluginEvent::Data(plugin_name_clone.clone(), serde_json::to_value(data.to_string()).unwrap_or_default()),
+                "error" => PluginEvent::Error(plugin_name_clone.clone(), data.to_string()),
+                _ => PluginEvent::Error(plugin_name_clone.clone(), format!("Unknown event type: {}", event_type)),
+            };
+            let _ = event_sender_clone.send(event);
+            Ok(())
+        })?;
+        lua.globals().set("send_event", send_event_fn)?;
+
         Ok(())
     }
 
-    fn execute_function(&mut self, plugin_id: &str, function: &str, args: &[Value]) -> Result<Value, Box<dyn std::error::Error>> {
-        if !self.loaded_plugins.contains_key(plugin_id) {
-            return Err("Plugin not loaded".into());
-        }
+    /// Calls a Lua function from Rust.
+    pub async fn call_lua_function(&self, function_name: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        let lua = self.lua.clone();
+        let func_name = function_name.to_string();
+        let args_lua = serde_json_to_lua(&lua, args)?;
 
-        let globals = self.lua.globals();
-        let func: Function = globals.get(function)?;
-        
-        // Convert JSON args to Lua values
-        let lua_args: LuaResult<Vec<LuaValue>> = args.iter()
-            .map(|arg| json_to_lua_value(&self.lua, arg.clone()))
-            .collect();
-        
-        let result = func.call::<_, LuaValue>(lua_args?)?;
-        Ok(lua_value_to_json(result)?)
-    }
-
-    fn list_functions(&self, plugin_id: &str) -> Vec<String> {
-        if !self.loaded_plugins.contains_key(plugin_id) {
-            return Vec::new();
-        }
-
-        let globals = self.lua.globals();
-        let mut functions = Vec::new();
-        
-        // This is a simplified implementation - in practice, you'd want to
-        // track which functions belong to which plugin
-        for pair in globals.pairs::<String, LuaValue>() {
-            if let Ok((name, value)) = pair {
-                if matches!(value, LuaValue::Function(_)) {
-                    functions.push(name);
-                }
-            }
-        }
-        
-        functions
+        tokio::task::spawn_blocking(move || {
+            let func: Function = lua.globals().get(&func_name)
+                .map_err(|e| format!("Lua function '{}' not found: {}", func_name, e))?;
+            let result: LuaValue = func.call(args_lua)
+                .map_err(|e| format!("Error calling Lua function '{}': {}", func_name, e))?;
+            lua_to_serde_json(&result)
+        }).await.map_err(|e| format!("Lua function call panicked: {}", e))?
     }
 }
 
-fn lua_value_to_json(value: LuaValue) -> LuaResult<Value> {
+// Helper to convert serde_json::Value to mlua::Value
+fn serde_json_to_lua(lua: &Lua, value: serde_json::Value) -> LuaResult<LuaValue> {
     match value {
-        LuaValue::Nil => Ok(Value::Null),
-        LuaValue::Boolean(b) => Ok(Value::Bool(b)),
-        LuaValue::Integer(i) => Ok(Value::Number(i.into())),
-        LuaValue::Number(n) => Ok(Value::Number(serde_json::Number::from_f64(n).unwrap_or_default())),
-        LuaValue::String(s) => Ok(Value::String(s.to_str()?.to_string())),
-        LuaValue::Table(t) => {
-            let mut map = serde_json::Map::new();
-            for pair in t.pairs::<LuaValue, LuaValue>() {
-                let (k, v) = pair?;
-                if let LuaValue::String(key) = k {
-                    map.insert(key.to_str()?.to_string(), lua_value_to_json(v)?);
-                }
-            }
-            Ok(Value::Object(map))
-        }
-        _ => Ok(Value::Null),
-    }
-}
-
-fn json_to_lua_value(lua: &Lua, value: Value) -> LuaResult<LuaValue> {
-    match value {
-        Value::Null => Ok(LuaValue::Nil),
-        Value::Bool(b) => Ok(LuaValue::Boolean(b)),
-        Value::Number(n) => {
+        serde_json::Value::Null => Ok(LuaValue::Nil),
+        serde_json::Value::Bool(b) => Ok(LuaValue::Boolean(b)),
+        serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(LuaValue::Integer(i))
             } else if let Some(f) = n.as_f64() {
                 Ok(LuaValue::Number(f))
             } else {
-                Ok(LuaValue::Nil)
+                Err(mlua::Error::external(format!("Unsupported number format: {}", n)))
             }
-        }
-        Value::String(s) => Ok(LuaValue::String(lua.create_string(&s)?)),
-        Value::Array(arr) => {
+        },
+        serde_json::Value::String(s) => Ok(LuaValue::String(lua.create_string(&s)?)),
+        serde_json::Value::Array(arr) => {
             let table = lua.create_table()?;
             for (i, item) in arr.into_iter().enumerate() {
-                table.set(i + 1, json_to_lua_value(lua, item)?)?;
+                table.set(i + 1, serde_json_to_lua(lua, item)?)?; // Lua arrays are 1-indexed
             }
             Ok(LuaValue::Table(table))
-        }
-        Value::Object(obj) => {
+        },
+        serde_json::Value::Object(obj) => {
             let table = lua.create_table()?;
-            for (key, value) in obj {
-                table.set(key, json_to_lua_value(lua, value)?)?;
+            for (key, val) in obj {
+                table.set(key, serde_json_to_lua(lua, val)?)?;
             }
             Ok(LuaValue::Table(table))
-        }
+        },
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// Helper to convert mlua::Value to serde_json::Value
+fn lua_to_serde_json(value: &LuaValue) -> Result<serde_json::Value, String> {
+    match value {
+        LuaValue::Nil => Ok(serde_json::Value::Null),
+        LuaValue::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+        LuaValue::LightUserData(_) => Err("LightUserData not supported".to_string()),
+        LuaValue::Integer(i) => Ok(serde_json::Value::Number(serde_json::Number::from(*i))),
+        LuaValue::Number(f) => Ok(serde_json::Value::Number(serde_json::Number::from_f64(*f).unwrap_or_default())),
+        LuaValue::String(s) => Ok(serde_json::Value::String(s.to_str().map_err(|e| e.to_string())?.to_string())),
+        LuaValue::Table(table) => {
+            let mut map = serde_json::Map::new();
+            let mut is_array = true;
+            let mut array_elements = Vec::new();
 
-    #[test]
-    fn test_lua_engine_creation() {
-        let engine = LuaEngine::new();
-        assert!(engine.is_ok());
-    }
+            for pair in table.clone().pairs::<LuaValue, LuaValue>() {
+                let (key, val) = pair.map_err(|e| e.to_string())?;
+                if let LuaValue::Integer(idx) = key {
+                    if idx as usize != array_elements.len() + 1 {
+                        is_array = false;
+                    }
+                    array_elements.push(lua_to_serde_json(&val)?);
+                } else {
+                    is_array = false;
+                    map.insert(lua_to_serde_json(&key)?.as_str().unwrap_or_default().to_string(), lua_to_serde_json(&val)?);
+                }
+            }
 
-    #[test]
-    fn test_json_conversion() {
-        let lua = Lua::new();
-        let json_val = Value::String("test".to_string());
-        let lua_val = json_to_lua_value(&lua, json_val.clone()).unwrap();
-        let converted_back = lua_value_to_json(lua_val).unwrap();
-        assert_eq!(json_val, converted_back);
+            if is_array {
+                Ok(serde_json::Value::Array(array_elements))
+            } else {
+                Ok(serde_json::Value::Object(map))
+            }
+        },
+        LuaValue::Function(_) => Err("Function not supported".to_string()),
+        LuaValue::Thread(_) => Err("Thread not supported".to_string()),
+        LuaValue::UserData(_) => Err("UserData not supported".to_string()),
+        LuaValue::Error(e) => Err(format!("Lua error: {}", e)),
     }
+}
+
+pub fn init() {
+    println!("plugins/lua_engine module loaded");
 }

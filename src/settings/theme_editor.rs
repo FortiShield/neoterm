@@ -1,246 +1,248 @@
-use iced::{Element, widget::{column, row, text, button, text_input, slider, color_picker}};
-use crate::config::{ThemeConfig, ColorScheme, ColorValue};
+use iced::{Element, widget::{column, row, text, button, text_input, pick_list, container, scrollable}, Length};
+use iced::Color;
+use std::collections::HashMap;
+use crate::config::{ThemeConfig, TerminalColors};
 use crate::config::yaml_theme_manager::YamlThemeManager;
+use crate::settings::Settings;
+
+#[derive(Debug, Clone)]
+pub enum ThemeEditorMessage {
+    SelectTheme(String),
+    EditColor(String, String), // (Color Name, New Hex Value)
+    SaveTheme,
+    LoadThemes,
+    // For adding custom colors
+    NewCustomColorNameChanged(String),
+    NewCustomColorValueChanged(String),
+    AddCustomColor,
+    DeleteCustomColor(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct ThemeEditor {
-    theme_manager: YamlThemeManager,
-    pub selected_theme_name: String,
-    theme: ThemeConfig,
-    editing_color: Option<String>,
-    preview_text: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum Message {
-    ColorChanged(String, ColorValue),
-    FontFamilyChanged(String),
-    FontSizeChanged(f32),
-    LineHeightChanged(f32),
-    BorderRadiusChanged(f32),
-    CreateTheme(String),
-    LoadTheme(String),
-    SaveTheme,
-    ResetTheme,
-    PreviewTextChanged(String),
-    ThemeSelected(String),
+    settings: Settings,
+    yaml_theme_manager: YamlThemeManager,
+    available_themes: Vec<String>,
+    selected_theme_name: Option<String>,
+    current_theme_config: ThemeConfig, // The theme currently being edited
+    new_custom_color_name: String,
+    new_custom_color_value: String,
 }
 
 impl ThemeEditor {
-    pub fn new(initial_theme_name: String) -> Self {
-        let theme_manager = YamlThemeManager::new();
-        let theme = theme_manager.get_theme(&initial_theme_name).unwrap_or_else(ThemeConfig::default);
+    pub fn new(settings: Settings, theme_dir: std::path::PathBuf) -> Self {
+        let mut manager = YamlThemeManager::new(theme_dir);
+        let _ = manager.load_themes(); // Load themes on startup
+        let available_themes = manager.get_available_theme_names();
+
+        let default_theme_name = settings.theme.name.clone();
+        let current_theme_config = manager.get_theme_config(&default_theme_name)
+            .unwrap_or_else(ThemeConfig::default);
+
         Self {
-            theme_manager,
-            selected_theme_name: initial_theme_name,
-            theme,
-            editing_color: None,
-            preview_text: "echo 'Hello, World!'\nls -la\ngit status".to_string(),
+            settings,
+            yaml_theme_manager: manager,
+            available_themes,
+            selected_theme_name: Some(default_theme_name),
+            current_theme_config,
+            new_custom_color_name: String::new(),
+            new_custom_color_value: String::new(),
         }
     }
 
-    pub fn update(&mut self, message: Message) {
+    pub fn update(&mut self, message: ThemeEditorMessage) -> Command<ThemeEditorMessage> {
         match message {
-            Message::ColorChanged(color_name, color) => {
-                self.update_color(&color_name, color);
+            ThemeEditorMessage::LoadThemes => {
+                let _ = self.yaml_theme_manager.load_themes();
+                self.available_themes = self.yaml_theme_manager.get_available_theme_names();
+                Command::none()
             }
-            Message::FontFamilyChanged(family) => {
-                self.theme.typography.font_family = family;
+            ThemeEditorMessage::SelectTheme(name) => {
+                if let Some(theme_config) = self.yaml_theme_manager.get_theme_config(&name) {
+                    self.selected_theme_name = Some(name);
+                    self.current_theme_config = theme_config;
+                    // Update main settings struct as well
+                    self.settings.theme = self.current_theme_config.clone();
+                }
+                Command::none()
             }
-            Message::FontSizeChanged(size) => {
-                self.theme.typography.font_size = size;
+            ThemeEditorMessage::EditColor(color_name, new_hex) => {
+                // Update terminal colors
+                match color_name.as_str() {
+                    "background" => self.current_theme_config.terminal_colors.background = new_hex,
+                    "foreground" => self.current_theme_config.terminal_colors.foreground = new_hex,
+                    "cursor" => self.current_theme_config.terminal_colors.cursor = new_hex,
+                    "selection" => self.current_theme_config.terminal_colors.selection = new_hex,
+                    "black" => self.current_theme_config.terminal_colors.black = new_hex,
+                    "red" => self.current_theme_config.terminal_colors.red = new_hex,
+                    "green" => self.current_theme_config.terminal_colors.green = new_hex,
+                    "yellow" => self.current_theme_config.terminal_colors.yellow = new_hex,
+                    "blue" => self.current_theme_config.terminal_colors.blue = new_hex,
+                    "magenta" => self.current_theme_config.terminal_colors.magenta = new_hex,
+                    "cyan" => self.current_theme_config.terminal_colors.cyan = new_hex,
+                    "white" => self.current_theme_config.terminal_colors.white = new_hex,
+                    "bright_black" => self.current_theme_config.terminal_colors.bright_black = new_hex,
+                    "bright_red" => self.current_theme_config.terminal_colors.bright_red = new_hex,
+                    "bright_green" => self.current_theme_config.terminal_colors.bright_green = new_hex,
+                    "bright_yellow" => self.current_theme_config.terminal_colors.bright_yellow = new_hex,
+                    "bright_blue" => self.current_theme_config.terminal_colors.bright_blue = new_hex,
+                    "bright_magenta" => self.current_theme_config.terminal_colors.bright_magenta = new_hex,
+                    "bright_cyan" => self.current_theme_config.terminal_colors.bright_cyan = new_hex,
+                    "bright_white" => self.current_theme_config.terminal_colors.bright_white = new_hex,
+                    _ => {
+                        // Update general colors or custom colors
+                        self.current_theme_config.colors.insert(color_name, new_hex);
+                    }
+                }
+                // Update main settings struct as well
+                self.settings.theme = self.current_theme_config.clone();
+                Command::none()
             }
-            Message::LineHeightChanged(height) => {
-                self.theme.typography.line_height = height;
+            ThemeEditorMessage::SaveTheme => {
+                // In a real application, you'd save self.current_theme_config
+                // to a YAML file in the themes directory.
+                println!("Saving theme: {}", self.current_theme_config.name);
+                // For now, just update the settings struct
+                self.settings.theme = self.current_theme_config.clone();
+                Command::none()
             }
-            Message::BorderRadiusChanged(radius) => {
-                self.theme.effects.border_radius = radius;
+            ThemeEditorMessage::NewCustomColorNameChanged(name) => {
+                self.new_custom_color_name = name;
+                Command::none()
             }
-            Message::PreviewTextChanged(text) => {
-                self.preview_text = text;
+            ThemeEditorMessage::NewCustomColorValueChanged(value) => {
+                self.new_custom_color_value = value;
+                Command::none()
             }
-            Message::ResetTheme => {
-                self.theme = ThemeConfig::default();
+            ThemeEditorMessage::AddCustomColor => {
+                if !self.new_custom_color_name.is_empty() && !self.new_custom_color_value.is_empty() {
+                    self.current_theme_config.colors.insert(
+                        self.new_custom_color_name.clone(),
+                        self.new_custom_color_value.clone(),
+                    );
+                    self.new_custom_color_name.clear();
+                    self.new_custom_color_value.clear();
+                    // Update main settings struct as well
+                    self.settings.theme = self.current_theme_config.clone();
+                }
+                Command::none()
             }
-            Message::ThemeSelected(name) => {
-                self.selected_theme_name = name;
-                self.theme = self.theme_manager.get_theme(&self.selected_theme_name).unwrap_or_else(ThemeConfig::default);
-                // In a real app, you'd apply the theme here
+            ThemeEditorMessage::DeleteCustomColor(color_name) => {
+                self.current_theme_config.colors.remove(&color_name);
+                // Update main settings struct as well
+                self.settings.theme = self.current_theme_config.clone();
+                Command::none()
             }
         }
     }
 
-    fn update_color(&mut self, color_name: &str, color: ColorValue) {
-        match color_name {
-            "background" => self.theme.colors.background = color,
-            "surface" => self.theme.colors.surface = color,
-            "text" => self.theme.colors.text = color,
-            "primary" => self.theme.colors.primary = color,
-            "secondary" => self.theme.colors.secondary = color,
-            "accent" => self.theme.colors.accent = color,
-            "success" => self.theme.colors.success = color,
-            "warning" => self.theme.colors.warning = color,
-            "error" => self.theme.colors.error = color,
-            _ => {}
-        }
-    }
-
-    pub fn view(&mut self) -> Element<Message> {
-        let themes = self.theme_manager.get_all_theme_names();
-        let theme_radios: Vec<Element<Message>> = themes
-            .into_iter()
-            .map(|name| {
-                radio(
-                    name.clone(),
-                    name.clone(),
-                    Some(self.selected_theme_name.clone()),
-                    Message::ThemeSelected,
-                )
-                .into()
-            })
-            .collect();
-
-        column![
-            text("Theme Editor").size(20),
-            text("Select a theme:"),
-            column(theme_radios).spacing(5),
-            
-            // Typography section
-            text("Typography").size(16),
-            row![
-                text("Font Family:").width(iced::Length::Fixed(120.0)),
-                text_input("Font name...", &self.theme.typography.font_family)
-                    .on_input(Message::FontFamilyChanged)
-            ].spacing(8),
-            
-            row![
-                text("Font Size:").width(iced::Length::Fixed(120.0)),
-                slider(8.0..=24.0, self.theme.typography.font_size, Message::FontSizeChanged)
-            ].spacing(8),
-            
-            row![
-                text("Line Height:").width(iced::Length::Fixed(120.0)),
-                slider(1.0..=2.0, self.theme.typography.line_height, Message::LineHeightChanged)
-            ].spacing(8),
-            
-            // Colors section
-            text("Colors").size(16),
-            self.create_color_section(),
-            
-            // Effects section
-            text("Effects").size(16),
-            row![
-                text("Border Radius:").width(iced::Length::Fixed(120.0)),
-                slider(0.0..=20.0, self.theme.effects.border_radius, Message::BorderRadiusChanged)
-            ].spacing(8),
-            
-            // Preview section
-            text("Preview").size(16),
-            self.create_preview(),
-            
-            // Actions
-            row![
-                button("Reset Theme").on_press(Message::ResetTheme),
-                button("Save Theme").on_press(Message::SaveTheme),
-            ].spacing(8),
-        ]
-        .spacing(10)
-        .into()
-    }
-
-    fn create_color_section(&self) -> Element<Message> {
-        let colors = vec![
-            ("Background", "background", &self.theme.colors.background),
-            ("Surface", "surface", &self.theme.colors.surface),
-            ("Text", "text", &self.theme.colors.text),
-            ("Primary", "primary", &self.theme.colors.primary),
-            ("Secondary", "secondary", &self.theme.colors.secondary),
-            ("Accent", "accent", &self.theme.colors.accent),
-            ("Success", "success", &self.theme.colors.success),
-            ("Warning", "warning", &self.theme.colors.warning),
-            ("Error", "error", &self.theme.colors.error),
-        ];
-
-        column(
-            colors.into_iter()
-                .map(|(label, key, color)| {
-                    row![
-                        text(label).width(iced::Length::Fixed(80.0)),
-                        self.create_color_picker(key, color),
-                        text(format!("#{:02X}{:02X}{:02X}", 
-                            (color.r * 255.0) as u8,
-                            (color.g * 255.0) as u8,
-                            (color.b * 255.0) as u8
-                        )).size(12)
-                    ]
-                    .spacing(8)
-                    .into()
-                })
-                .collect::<Vec<_>>()
-        )
-        .spacing(8)
-        .into()
-    }
-
-    fn create_color_picker(&self, key: &str, color: &ColorValue) -> Element<Message> {
-        // In a real implementation, you'd use a proper color picker widget
-        // For now, we'll use sliders for RGB values
-        let key = key.to_string();
-        
-        row![
-            slider(0.0..=1.0, color.r, move |r| {
-                Message::ColorChanged(key.clone(), ColorValue { r, g: color.g, b: color.b, a: color.a })
-            }),
-            slider(0.0..=1.0, color.g, move |g| {
-                Message::ColorChanged(key.clone(), ColorValue { r: color.r, g, b: color.b, a: color.a })
-            }),
-            slider(0.0..=1.0, color.b, move |b| {
-                Message::ColorChanged(key.clone(), ColorValue { r: color.r, g: color.g, b, a: color.a })
-            }),
-        ]
-        .spacing(4)
-        .into()
-    }
-
-    fn create_preview(&self) -> Element<Message> {
-        column![
-            text_input("Preview text...", &self.preview_text)
-                .on_input(Message::PreviewTextChanged),
-            
-            // Preview terminal block
-            iced::widget::container(
-                column![
-                    text("$ echo 'Hello, World!'")
-                        .style(|_| iced::widget::text::Appearance {
-                            color: Some(self.theme.colors.primary.into()),
-                        }),
-                    text("Hello, World!")
-                        .style(|_| iced::widget::text::Appearance {
-                            color: Some(self.theme.colors.text.into()),
-                        }),
-                    text("$ ls -la")
-                        .style(|_| iced::widget::text::Appearance {
-                            color: Some(self.theme.colors.primary.into()),
-                        }),
-                    text("drwxr-xr-x  5 user user 4096 Jan 15 10:30 .")
-                        .style(|_| iced::widget::text::Appearance {
-                            color: Some(self.theme.colors.text.into()),
-                        }),
-                ]
-                .spacing(4)
+    pub fn view(&self) -> Element<ThemeEditorMessage> {
+        let theme_selector = row![
+            text("Select Theme:"),
+            pick_list(
+                self.available_themes.clone(),
+                self.selected_theme_name.clone(),
+                ThemeEditorMessage::SelectTheme,
             )
-            .padding(self.theme.spacing.block_padding)
-            .style(move |_| iced::widget::container::Appearance {
-                background: Some(self.theme.colors.terminal_background.into()),
-                border: iced::Border {
-                    color: self.theme.colors.border.into(),
-                    width: 1.0,
-                    radius: self.theme.effects.border_radius.into(),
-                },
-                ..Default::default()
-            })
-        ]
-        .spacing(8)
-        .into()
+        ].spacing(10).align_items(iced::Alignment::Center);
+
+        let mut color_rows = column![].spacing(5);
+
+        // Terminal Colors
+        color_rows = color_rows.push(text("Terminal Colors").size(20).width(Length::Fill));
+        let terminal_colors_map = self.current_theme_config.terminal_colors.to_map();
+        for (name, hex) in terminal_colors_map.iter() {
+            color_rows = color_rows.push(self.color_input_row(name.clone(), hex.clone()));
+        }
+
+        // General Colors
+        color_rows = color_rows.push(text("General Colors").size(20).width(Length::Fill));
+        for (name, hex) in self.current_theme_config.colors.iter() {
+            color_rows = color_rows.push(self.color_input_row(name.clone(), hex.clone()));
+        }
+
+        // Add Custom Color section
+        let add_custom_color_section = column![
+            text("Add Custom Color").size(20),
+            row![
+                text_input("Color Name", &self.new_custom_color_name)
+                    .on_input(ThemeEditorMessage::NewCustomColorNameChanged)
+                    .width(Length::FillPortion(1)),
+                text_input("Hex Value (#RRGGBB)", &self.new_custom_color_value)
+                    .on_input(ThemeEditorMessage::NewCustomColorValueChanged)
+                    .width(Length::FillPortion(1)),
+                button(text("Add")).on_press(ThemeEditorMessage::AddCustomColor),
+            ].spacing(10)
+        ].spacing(10).padding(10).into();
+
+
+        column![
+            theme_selector,
+            iced::widget::horizontal_rule(1),
+            scrollable(color_rows).height(Length::FillPortion(1)),
+            add_custom_color_section,
+            button(text("Save Theme")).on_press(ThemeEditorMessage::SaveTheme),
+        ].spacing(10).padding(20).into()
     }
+
+    fn color_input_row(&self, name: String, hex_value: String) -> Element<ThemeEditorMessage> {
+        let color_preview = container(text(" "))
+            .width(Length::Units(20))
+            .height(Length::Units(20))
+            .style(iced::theme::Container::Custom(Box::new(ColorPreviewStyle {
+                color: parse_hex_color(&hex_value).unwrap_or(Color::BLACK),
+            })));
+
+        row![
+            text(name.clone()).width(Length::FillPortion(1)),
+            color_preview,
+            text_input("Hex", &hex_value)
+                .on_input(move |s| ThemeEditorMessage::EditColor(name.clone(), s))
+                .width(Length::FillPortion(2)),
+            button(text("Delete")).on_press(ThemeEditorMessage::DeleteCustomColor(name.clone()))
+                .style(iced::theme::Button::Destructive)
+                .width(Length::Shrink)
+                .into(),
+        ].spacing(10).align_items(iced::Alignment::Center).into()
+    }
+
+    pub fn get_updated_settings(&self) -> &Settings {
+        &self.settings
+    }
+}
+
+// Helper to convert hex string to iced::Color
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(Color::from_rgb8(r, g, b))
+    } else {
+        None
+    }
+}
+
+// Custom style for color preview
+struct ColorPreviewStyle {
+    color: Color,
+}
+
+impl iced::widget::container::StyleSheet for ColorPreviewStyle {
+    type Style = iced::Theme;
+
+    fn appearance(&self, _style: &Self::Style) -> iced::widget::container::Appearance {
+        iced::widget::container::Appearance {
+            background: Some(self.color.into()),
+            border_radius: 4.0,
+            border_width: 1.0,
+            border_color: Color::BLACK,
+            ..Default::default()
+        }
+    }
+}
+
+pub fn init() {
+    println!("settings/theme_editor module loaded");
 }

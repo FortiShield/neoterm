@@ -1,432 +1,200 @@
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
+use tokio::sync::mpsc;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Represents the result of a single benchmark run.
+#[derive(Debug, Clone)]
 pub struct BenchmarkResult {
     pub name: String,
     pub duration: Duration,
-    pub operations_per_second: f64,
-    pub memory_usage: Option<usize>,
+    pub metrics: HashMap<String, f64>, // e.g., "lines_per_second", "avg_latency_ms"
     pub success: bool,
     pub error: Option<String>,
-    pub metadata: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A suite of performance benchmarks for NeoTerm components.
+#[derive(Debug, Clone)]
 pub struct BenchmarkSuite {
-    pub name: String,
-    pub results: Vec<BenchmarkResult>,
-    pub total_duration: Duration,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    // Configuration for benchmarks, e.g., number of iterations, test data size
+    num_iterations: usize,
+    test_data_size_kb: usize,
 }
 
-pub struct PerformanceBenchmarks {
-    results: Vec<BenchmarkResult>,
-}
-
-impl PerformanceBenchmarks {
+impl BenchmarkSuite {
     pub fn new() -> Self {
         Self {
-            results: Vec::new(),
+            num_iterations: 5,
+            test_data_size_kb: 1024, // 1MB of test data
         }
     }
 
-    pub async fn run_all_benchmarks(&mut self) -> BenchmarkSuite {
-        let start_time = Instant::now();
-        
-        // Terminal rendering benchmarks
-        self.benchmark_terminal_rendering().await;
-        self.benchmark_command_execution().await;
-        self.benchmark_fuzzy_matching().await;
-        self.benchmark_ai_processing().await;
-        self.benchmark_workflow_execution().await;
-        self.benchmark_plugin_loading().await;
-        self.benchmark_memory_usage().await;
-        
-        let total_duration = start_time.elapsed();
-        
-        BenchmarkSuite {
-            name: "NeoPilot Terminal Performance Suite".to_string(),
-            results: self.results.clone(),
-            total_duration,
-            timestamp: chrono::Utc::now(),
+    /// Runs all defined benchmarks and returns a summary.
+    pub async fn run_all_benchmarks(&self, tx: mpsc::UnboundedSender<BenchmarkResult>) {
+        println!("Running performance benchmarks...");
+
+        // Benchmark 1: Terminal Output Rendering Speed
+        let result = self.benchmark_terminal_output_rendering().await;
+        let _ = tx.send(result);
+
+        // Benchmark 2: Command Execution Latency
+        let result = self.benchmark_command_execution_latency().await;
+        let _ = tx.send(result);
+
+        // Benchmark 3: File System Read Performance (Virtual FS or real)
+        let result = self.benchmark_file_read_performance().await;
+        let _ = tx.send(result);
+
+        println!("Performance benchmarks completed.");
+    }
+
+    async fn benchmark_terminal_output_rendering(&self) -> BenchmarkResult {
+        let name = "Terminal Output Rendering Speed".to_string();
+        let mut total_duration = Duration::new(0, 0);
+        let mut success = true;
+        let mut error: Option<String> = None;
+        let mut total_lines = 0;
+
+        let test_line = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n";
+        let num_lines = (self.test_data_size_kb * 1024) / test_line.len(); // Lines to fill 1MB
+
+        for i in 0..self.num_iterations {
+            let start = Instant::now();
+            // Simulate rendering a large amount of text
+            // In a real scenario, this would interact with the actual rendering engine
+            for _ in 0..num_lines {
+                // Simulate writing to a buffer that would eventually be rendered
+                // This is a very rough approximation.
+                let _ = test_line.as_bytes(); // Just to "touch" the data
+            }
+            let duration = start.elapsed();
+            total_duration += duration;
+            total_lines += num_lines;
+            println!("  Iteration {} for {}: {:?}", i + 1, name, duration);
+        }
+
+        let avg_duration = total_duration / self.num_iterations as u32;
+        let lines_per_second = total_lines as f64 / avg_duration.as_secs_f64();
+
+        let mut metrics = HashMap::new();
+        metrics.insert("avg_duration_ms".to_string(), avg_duration.as_millis() as f64);
+        metrics.insert("lines_per_second".to_string(), lines_per_second);
+
+        BenchmarkResult {
+            name,
+            duration: avg_duration,
+            metrics,
+            success,
+            error,
         }
     }
 
-    async fn benchmark_terminal_rendering(&mut self) {
-        let start = Instant::now();
-        let mut operations = 0;
-        
-        // Simulate terminal rendering operations
-        for _ in 0..1000 {
-            // Simulate rendering a block with 100 lines
-            let _rendered_content = self.simulate_block_rendering(100);
-            operations += 1;
+    async fn benchmark_command_execution_latency(&self) -> BenchmarkResult {
+        let name = "Command Execution Latency".to_string();
+        let mut total_duration = Duration::new(0, 0);
+        let mut success = true;
+        let mut error: Option<String> = None;
+
+        let command = if cfg!(windows) { "cmd" } else { "sh" };
+        let args = if cfg!(windows) { vec!["/c".to_string(), "echo Hello".to_string()] } else { vec!["-c".to_string(), "echo Hello".to_string()] };
+
+        for i in 0..self.num_iterations {
+            let start = Instant::now();
+            let mut child = TokioCommand::new(command)
+                .args(&args)
+                .stdout(std::process::Stdio::piped())
+                .spawn();
+
+            match child {
+                Ok(mut child) => {
+                    let _ = child.wait().await; // Wait for command to complete
+                    let duration = start.elapsed();
+                    total_duration += duration;
+                    println!("  Iteration {} for {}: {:?}", i + 1, name, duration);
+                }
+                Err(e) => {
+                    success = false;
+                    error = Some(format!("Failed to spawn command: {}", e));
+                    eprintln!("  Error in {}: {}", name, e);
+                    break;
+                }
+            }
         }
-        
-        let duration = start.elapsed();
-        let ops_per_sec = operations as f64 / duration.as_secs_f64();
-        
-        self.results.push(BenchmarkResult {
-            name: "Terminal Rendering".to_string(),
-            duration,
-            operations_per_second: ops_per_sec,
-            memory_usage: None,
-            success: true,
-            error: None,
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("blocks_rendered".to_string(), serde_json::Value::Number(operations.into()));
-                map.insert("lines_per_block".to_string(), serde_json::Value::Number(100.into()));
-                map
-            },
-        });
+
+        let avg_duration = total_duration / self.num_iterations as u32;
+        let mut metrics = HashMap::new();
+        metrics.insert("avg_latency_ms".to_string(), avg_duration.as_millis() as f64);
+
+        BenchmarkResult {
+            name,
+            duration: avg_duration,
+            metrics,
+            success,
+            error,
+        }
     }
 
-    async fn benchmark_command_execution(&mut self) {
-        let start = Instant::now();
-        let mut successful_commands = 0;
-        let mut failed_commands = 0;
-        
-        // Simulate command execution
-        for i in 0..100 {
-            let command_start = Instant::now();
-            
-            // Simulate different command types
-            let success = match i % 4 {
-                0 => self.simulate_fast_command().await,
-                1 => self.simulate_medium_command().await,
-                2 => self.simulate_slow_command().await,
-                _ => self.simulate_failing_command().await,
+    async fn benchmark_file_read_performance(&self) -> BenchmarkResult {
+        let name = "File Read Performance".to_string();
+        let mut total_duration = Duration::new(0, 0);
+        let mut success = true;
+        let mut error: Option<String> = None;
+
+        let temp_file_path = format!("temp_benchmark_file_{}.txt", Uuid::new_v4());
+        let file_content = "a".repeat(self.test_data_size_kb * 1024); // 1MB of 'a's
+
+        // Create a dummy file for reading
+        if let Err(e) = tokio::fs::write(&temp_file_path, &file_content).await {
+            return BenchmarkResult {
+                name,
+                duration: Duration::new(0, 0),
+                metrics: HashMap::new(),
+                success: false,
+                error: Some(format!("Failed to create temp file: {}", e)),
             };
-            
-            if success {
-                successful_commands += 1;
-            } else {
-                failed_commands += 1;
-            }
         }
-        
-        let duration = start.elapsed();
-        let ops_per_sec = (successful_commands + failed_commands) as f64 / duration.as_secs_f64();
-        
-        self.results.push(BenchmarkResult {
-            name: "Command Execution".to_string(),
-            duration,
-            operations_per_second: ops_per_sec,
-            memory_usage: None,
-            success: failed_commands == 0,
-            error: if failed_commands > 0 { 
-                Some(format!("{} commands failed", failed_commands)) 
-            } else { 
-                None 
-            },
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("successful_commands".to_string(), serde_json::Value::Number(successful_commands.into()));
-                map.insert("failed_commands".to_string(), serde_json::Value::Number(failed_commands.into()));
-                map
-            },
-        });
-    }
 
-    async fn benchmark_fuzzy_matching(&mut self) {
-        let start = Instant::now();
-        let test_strings = self.generate_test_strings(10000);
-        let queries = vec!["test", "file", "command", "workflow", "plugin"];
-        
-        let mut total_matches = 0;
-        
-        for query in &queries {
-            for test_string in &test_strings {
-                if crate::fuzzy_match::fuzzy_match(query, test_string) > 0.5 {
-                    total_matches += 1;
+        for i in 0..self.num_iterations {
+            let start = Instant::now();
+            match tokio::fs::read_to_string(&temp_file_path).await {
+                Ok(content) => {
+                    if content.len() != file_content.len() {
+                        success = false;
+                        error = Some("Read content size mismatch.".to_string());
+                    }
+                }
+                Err(e) => {
+                    success = false;
+                    error = Some(format!("Failed to read file: {}", e));
                 }
             }
-        }
-        
-        let duration = start.elapsed();
-        let ops_per_sec = (test_strings.len() * queries.len()) as f64 / duration.as_secs_f64();
-        
-        self.results.push(BenchmarkResult {
-            name: "Fuzzy Matching".to_string(),
-            duration,
-            operations_per_second: ops_per_sec,
-            memory_usage: None,
-            success: true,
-            error: None,
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("test_strings".to_string(), serde_json::Value::Number(test_strings.len().into()));
-                map.insert("queries".to_string(), serde_json::Value::Number(queries.len().into()));
-                map.insert("total_matches".to_string(), serde_json::Value::Number(total_matches.into()));
-                map
-            },
-        });
-    }
-
-    async fn benchmark_ai_processing(&mut self) {
-        let start = Instant::now();
-        let mut processed_messages = 0;
-        
-        // Simulate AI message processing
-        for _ in 0..50 {
-            let message_start = Instant::now();
-            
-            // Simulate AI processing time
-            sleep(Duration::from_millis(10)).await;
-            
-            processed_messages += 1;
-        }
-        
-        let duration = start.elapsed();
-        let ops_per_sec = processed_messages as f64 / duration.as_secs_f64();
-        
-        self.results.push(BenchmarkResult {
-            name: "AI Processing".to_string(),
-            duration,
-            operations_per_second: ops_per_sec,
-            memory_usage: None,
-            success: true,
-            error: None,
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("messages_processed".to_string(), serde_json::Value::Number(processed_messages.into()));
-                map
-            },
-        });
-    }
-
-    async fn benchmark_workflow_execution(&mut self) {
-        let start = Instant::now();
-        let mut workflows_executed = 0;
-        
-        // Simulate workflow execution
-        for _ in 0..20 {
-            // Simulate workflow with 5 steps
-            for _ in 0..5 {
-                sleep(Duration::from_millis(5)).await;
-            }
-            workflows_executed += 1;
-        }
-        
-        let duration = start.elapsed();
-        let ops_per_sec = workflows_executed as f64 / duration.as_secs_f64();
-        
-        self.results.push(BenchmarkResult {
-            name: "Workflow Execution".to_string(),
-            duration,
-            operations_per_second: ops_per_sec,
-            memory_usage: None,
-            success: true,
-            error: None,
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("workflows_executed".to_string(), serde_json::Value::Number(workflows_executed.into()));
-                map.insert("steps_per_workflow".to_string(), serde_json::Value::Number(5.into()));
-                map
-            },
-        });
-    }
-
-    async fn benchmark_plugin_loading(&mut self) {
-        let start = Instant::now();
-        let mut plugins_loaded = 0;
-        
-        // Simulate plugin loading
-        for _ in 0..10 {
-            // Simulate plugin initialization time
-            sleep(Duration::from_millis(20)).await;
-            plugins_loaded += 1;
-        }
-        
-        let duration = start.elapsed();
-        let ops_per_sec = plugins_loaded as f64 / duration.as_secs_f64();
-        
-        self.results.push(BenchmarkResult {
-            name: "Plugin Loading".to_string(),
-            duration,
-            operations_per_second: ops_per_sec,
-            memory_usage: None,
-            success: true,
-            error: None,
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("plugins_loaded".to_string(), serde_json::Value::Number(plugins_loaded.into()));
-                map
-            },
-        });
-    }
-
-    async fn benchmark_memory_usage(&mut self) {
-        let start = Instant::now();
-        
-        // Simulate memory-intensive operations
-        let mut data_structures = Vec::new();
-        
-        for i in 0..1000 {
-            let data = vec![i; 1000]; // 1000 integers
-            data_structures.push(data);
-        }
-        
-        let duration = start.elapsed();
-        let memory_estimate = data_structures.len() * 1000 * std::mem::size_of::<i32>();
-        
-        // Clean up
-        drop(data_structures);
-        
-        self.results.push(BenchmarkResult {
-            name: "Memory Usage".to_string(),
-            duration,
-            operations_per_second: 1000.0 / duration.as_secs_f64(),
-            memory_usage: Some(memory_estimate),
-            success: true,
-            error: None,
-            metadata: {
-                let mut map = HashMap::new();
-                map.insert("allocated_structures".to_string(), serde_json::Value::Number(1000.into()));
-                map.insert("estimated_memory_bytes".to_string(), serde_json::Value::Number(memory_estimate.into()));
-                map
-            },
-        });
-    }
-
-    fn simulate_block_rendering(&self, lines: usize) -> String {
-        // Simulate rendering by creating a string with the specified number of lines
-        (0..lines)
-            .map(|i| format!("Line {} with some content that needs to be rendered", i))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    async fn simulate_fast_command(&self) -> bool {
-        sleep(Duration::from_millis(1)).await;
-        true
-    }
-
-    async fn simulate_medium_command(&self) -> bool {
-        sleep(Duration::from_millis(10)).await;
-        true
-    }
-
-    async fn simulate_slow_command(&self) -> bool {
-        sleep(Duration::from_millis(100)).await;
-        true
-    }
-
-    async fn simulate_failing_command(&self) -> bool {
-        sleep(Duration::from_millis(5)).await;
-        false
-    }
-
-    fn generate_test_strings(&self, count: usize) -> Vec<String> {
-        let prefixes = vec!["test", "file", "command", "workflow", "plugin", "config", "theme"];
-        let suffixes = vec!["data", "info", "manager", "handler", "processor", "controller"];
-        
-        (0..count)
-            .map(|i| {
-                let prefix = &prefixes[i % prefixes.len()];
-                let suffix = &suffixes[i % suffixes.len()];
-                format!("{}_{}_{}_{}", prefix, suffix, i, i * 2)
-            })
-            .collect()
-    }
-
-    pub fn get_performance_summary(&self) -> String {
-        if self.results.is_empty() {
-            return "No benchmark results available".to_string();
+            let duration = start.elapsed();
+            total_duration += duration;
+            println!("  Iteration {} for {}: {:?}", i + 1, name, duration);
         }
 
-        let total_duration: Duration = self.results.iter().map(|r| r.duration).sum();
-        let avg_ops_per_sec: f64 = self.results.iter().map(|r| r.operations_per_second).sum::<f64>() / self.results.len() as f64;
-        let success_rate = self.results.iter().filter(|r| r.success).count() as f64 / self.results.len() as f64 * 100.0;
+        // Clean up the dummy file
+        if let Err(e) = tokio::fs::remove_file(&temp_file_path).await {
+            eprintln!("Failed to remove temp file {}: {}", temp_file_path, e);
+        }
 
-        // Find fastest and slowest based on operations_per_second
-        let fastest_benchmark = self.results.iter()
-            .max_by(|a, b| a.operations_per_second.partial_cmp(&b.operations_per_second).unwrap_or(std::cmp::Ordering::Equal));
-        let slowest_benchmark = self.results.iter()
-            .min_by(|a, b| a.operations_per_second.partial_cmp(&b.operations_per_second).unwrap_or(std::cmp::Ordering::Equal));
+        let avg_duration = total_duration / self.num_iterations as u32;
+        let mut metrics = HashMap::new();
+        metrics.insert("avg_read_time_ms".to_string(), avg_duration.as_millis() as f64);
+        metrics.insert("data_size_kb".to_string(), self.test_data_size_kb as f64);
 
-        format!(
-            "Performance Summary:\n\
-            - Total benchmarks: {}\n\
-            - Total duration: {:.2}s\n\
-            - Average ops/sec: {:.2}\n\
-            - Success rate: {:.1}%\n\
-            - Fastest benchmark: {} ({:.2} ops/sec)\n\
-            - Slowest benchmark: {} ({:.2} ops/sec)",
-            self.results.len(),
-            total_duration.as_secs_f64(),
-            avg_ops_per_sec,
-            success_rate,
-            fastest_benchmark.map(|r| &r.name).unwrap_or("N/A"),
-            fastest_benchmark.map(|r| r.operations_per_second).unwrap_or(0.0),
-            slowest_benchmark.map(|r| &r.name).unwrap_or("N/A"),
-            slowest_benchmark.map(|r| r.operations_per_second).unwrap_or(f64::INFINITY)
-        )
-    }
-
-    pub fn export_results(&self, format: &str) -> Result<String, Box<dyn std::error::Error>> {
-        match format.to_lowercase().as_str() {
-            "json" => Ok(serde_json::to_string_pretty(&self.results)?),
-            "csv" => {
-                let mut csv = String::from("name,duration_ms,ops_per_sec,success,error\n");
-                for result in &self.results {
-                    csv.push_str(&format!(
-                        "{},{},{},{},{}\n",
-                        result.name,
-                        result.duration.as_millis(),
-                        result.operations_per_second,
-                        result.success,
-                        result.error.as_deref().unwrap_or("")
-                    ));
-                }
-                Ok(csv)
-            }
-            _ => Err("Unsupported format. Use 'json' or 'csv'".into())
+        BenchmarkResult {
+            name,
+            duration: avg_duration,
+            metrics,
+            success,
+            error,
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_benchmark_creation() {
-        let benchmarks = PerformanceBenchmarks::new();
-        assert_eq!(benchmarks.results.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_terminal_rendering_benchmark() {
-        let mut benchmarks = PerformanceBenchmarks::new();
-        benchmarks.benchmark_terminal_rendering().await;
-        
-        assert_eq!(benchmarks.results.len(), 1);
-        assert_eq!(benchmarks.results[0].name, "Terminal Rendering");
-        assert!(benchmarks.results[0].success);
-    }
-
-    #[test]
-    fn test_export_results() {
-        let mut benchmarks = PerformanceBenchmarks::new();
-        benchmarks.results.push(BenchmarkResult {
-            name: "Test".to_string(),
-            duration: Duration::from_millis(100),
-            operations_per_second: 10.0,
-            memory_usage: None,
-            success: true,
-            error: None,
-            metadata: HashMap::new(),
-        });
-
-        let json_export = benchmarks.export_results("json").unwrap();
-        assert!(json_export.contains("Test"));
-        
-        let csv_export = benchmarks.export_results("csv").unwrap();
-        assert!(csv_export.contains("name,duration_ms"));
-    }
+pub fn init() {
+    println!("performance/benchmarks module loaded");
 }

@@ -1,56 +1,109 @@
-use std::process::{Command, Stdio};
-use std::io::{self, Write, Read};
-use std::thread;
+use tokio::sync::mpsc;
+use std::collections::HashMap;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
+use uuid::Uuid;
 
-pub struct ShellManager {
-    // In a real application, this would manage active shell sessions (e.g., using portable-pty)
+/// Represents a shell session.
+/// This struct manages the lifecycle of a shell process and its I/O.
+pub struct Shell {
+    pub id: Uuid,
+    pub command: String,
+    pub args: Vec<String>,
+    pub working_directory: Option<String>,
+    pub environment: HashMap<String, String>,
+    // Sender to send shell output/events back to the main application
+    output_sender: mpsc::UnboundedSender<ShellOutput>,
+    // Child process handle
+    // child: Option<tokio::process::Child>, // Managed internally by spawn_and_stream
 }
 
-impl ShellManager {
-    pub fn new() -> Self {
-        Self {}
-    }
+/// Messages sent from the shell to the main application.
+#[derive(Debug, Clone)]
+pub enum ShellOutput {
+    Stdout(String),
+    Stderr(String),
+    Exit(i32),
+    Error(String),
+    Started,
+}
 
-    // This is a simplified execute_command for demonstration.
-    // The actual PTY-based execution is handled in src/command/pty.rs
-    pub fn execute_command_sync(&self, command: &str) -> io::Result<String> {
-        let mut child = if cfg!(target_os = "windows") {
-            Command::new("cmd")
-                .arg("/C")
-                .arg(command)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?
-        } else {
-            Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?
-        };
-
-        let mut stdout_output = String::new();
-        let mut stderr_output = String::new();
-
-        if let Some(stdout) = child.stdout.take() {
-            let mut reader = io::BufReader::new(stdout);
-            reader.read_to_string(&mut stdout_output)?;
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let mut reader = io::BufReader::new(stderr);
-            reader.read_to_string(&mut stderr_output)?;
-        }
-
-        let status = child.wait()?;
-
-        if status.success() {
-            Ok(stdout_output)
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Command failed with exit code {:?}: {}", status.code(), stderr_output),
-            ))
+impl Shell {
+    pub fn new(
+        command: String,
+        args: Vec<String>,
+        working_directory: Option<String>,
+        environment: HashMap<String, String>,
+        output_sender: mpsc::UnboundedSender<ShellOutput>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            command,
+            args,
+            working_directory,
+            environment,
+            output_sender,
         }
     }
+
+    /// Spawns the shell process and streams its output.
+    pub async fn spawn_and_stream(mut self) {
+        let _ = self.output_sender.send(ShellOutput::Started);
+        println!("Spawning shell: {} {:?}", self.command, self.args);
+
+        let mut cmd = TokioCommand::new(&self.command);
+        cmd.args(&self.args);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.envs(&self.environment);
+
+        if let Some(wd) = &self.working_directory {
+            cmd.current_dir(wd);
+        }
+
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let stdout = child.stdout.take().expect("Failed to take stdout");
+                let stderr = child.stderr.take().expect("Failed to take stderr");
+
+                let mut stdout_reader = BufReader::new(stdout).lines();
+                let mut stderr_reader = BufReader::new(stderr).lines();
+
+                loop {
+                    tokio::select! {
+                        Ok(Some(line)) = stdout_reader.next_line() => {
+                            let _ = self.output_sender.send(ShellOutput::Stdout(line + "\n"));
+                        }
+                        Ok(Some(line)) = stderr_reader.next_line() => {
+                            let _ = self.output_sender.send(ShellOutput::Stderr(line + "\n"));
+                        }
+                        status = child.wait() => {
+                            match status {
+                                Ok(exit_status) => {
+                                    let code = exit_status.code().unwrap_or(-1);
+                                    let _ = self.output_sender.send(ShellOutput::Exit(code));
+                                }
+                                Err(e) => {
+                                    let _ = self.output_sender.send(ShellOutput::Error(format!("Failed to wait for shell: {}", e)));
+                                }
+                            }
+                            break;
+                        }
+                        else => break, // All streams closed and child exited
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = self.output_sender.send(ShellOutput::Error(format!("Failed to spawn shell '{}': {}", self.command, e)));
+            }
+        }
+    }
+
+    // Potentially add methods for sending input to the shell (if using PTY)
+    // pub async fn send_input(&self, input: &str) -> Result<(), String> { ... }
+}
+
+pub fn init() {
+    println!("shell module loaded");
 }

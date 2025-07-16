@@ -9,12 +9,28 @@ pub struct UserPreferences {
     pub ui: UiPreferences,
     pub performance: PerformancePreferences,
     pub privacy: PrivacyPreferences,
-    // pub environment_profiles: EnvironmentProfiles, // Moved to AppConfig
-    // pub theme: String, // Moved to AppConfig
-    pub font_size: u16, // Kept here as it's a preference, not a full theme object
+    pub font_size: u16,
     pub shell: String,
     pub enable_ai_suggestions: bool,
     pub enable_telemetry: bool,
+    pub terminal_rows: u16,
+    pub terminal_cols: u16,
+    pub enable_ligatures: bool,
+    pub scrollback_lines: u32,
+    pub default_working_directory: Option<String>,
+    pub enable_transparency: bool,
+    pub transparency_level: f32,
+    pub enable_bell: bool,
+    pub paste_on_middle_click: bool,
+    pub confirm_exit: bool,
+    pub auto_update_check: bool,
+    pub max_history_size: u32,
+    pub enable_fuzzy_search: bool,
+    pub enable_ai_agent: bool,
+    pub enable_cloud_sync: bool,
+    pub enable_session_sharing: bool,
+    pub enable_plugins: bool,
+    pub default_environment_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +116,7 @@ pub struct UiPreferences {
     pub show_title_bar: bool,
     pub show_menu_bar: bool,
     pub compact_mode: bool,
-    pub transparency: f32, // 0.0 to 1.0
+    pub transparency: f32,
     pub blur_background: bool,
     pub animations_enabled: bool,
     pub reduce_motion: bool,
@@ -120,7 +136,7 @@ pub struct PerformancePreferences {
     pub gpu_acceleration: bool,
     pub vsync: bool,
     pub max_fps: Option<u32>,
-    pub memory_limit: Option<usize>, // MB
+    pub memory_limit: Option<usize>,
     pub background_throttling: bool,
     pub lazy_rendering: bool,
     pub texture_atlas_size: u32,
@@ -138,11 +154,10 @@ pub struct PrivacyPreferences {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
     Debug,
-    Trace,
+    Info,
+    Warn,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +170,7 @@ pub struct KeyBinding {
     pub key: String,
     pub modifiers: Vec<Modifier>,
     pub action: Action,
-    pub when: Option<String>, // Context condition
+    pub when: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,12 +178,11 @@ pub enum Modifier {
     Ctrl,
     Alt,
     Shift,
-    Super, // Cmd on macOS, Windows key on Windows
+    Super,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
-    // Terminal actions
     NewTab,
     CloseTab,
     NextTab,
@@ -176,8 +190,6 @@ pub enum Action {
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
-    
-    // Edit actions
     Copy,
     Paste,
     Cut,
@@ -185,19 +197,13 @@ pub enum Action {
     Find,
     FindNext,
     FindPrevious,
-    
-    // Navigation
     ScrollUp,
     ScrollDown,
     ScrollToTop,
     ScrollToBottom,
-    
-    // Application
     ToggleFullscreen,
     ToggleSettings,
     Quit,
-    
-    // Custom command
     Command(String),
 }
 
@@ -209,8 +215,6 @@ pub struct PluginConfig {
     pub allow_unsigned_plugins: bool,
 }
 
-// EnvironmentProfiles and EnvironmentProfile are now in src/config/mod.rs
-
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
@@ -220,12 +224,30 @@ impl Default for UserPreferences {
             ui: UiPreferences::default(),
             performance: PerformancePreferences::default(),
             privacy: PrivacyPreferences::default(),
-            // environment_profiles: EnvironmentProfiles::default(), // Removed
-            // theme: "default".to_string(), // Removed
             font_size: 14,
-            shell: "bash".to_string(),
+            shell: if cfg!(windows) { "powershell.exe".to_string() } else { "bash".to_string() },
             enable_ai_suggestions: true,
             enable_telemetry: false,
+            terminal_rows: 24,
+            terminal_cols: 80,
+            enable_ligatures: true,
+            scrollback_lines: 10000,
+            default_working_directory: None,
+            enable_transparency: false,
+            transparency_level: 0.9,
+            enable_bell: true,
+            paste_on_middle_click: false,
+            confirm_exit: true,
+            auto_update_check: true,
+            log_level: LogLevel::Info,
+            enable_gpu_rendering: true,
+            max_history_size: 1000,
+            enable_fuzzy_search: true,
+            enable_ai_agent: true,
+            enable_cloud_sync: false,
+            enable_session_sharing: false,
+            enable_plugins: true,
+            default_environment_profile: None,
         }
     }
 }
@@ -303,7 +325,7 @@ impl Default for PerformancePreferences {
             gpu_acceleration: true,
             vsync: true,
             max_fps: Some(60),
-            memory_limit: Some(1024), // 1GB
+            memory_limit: Some(1024),
             background_throttling: true,
             lazy_rendering: true,
             texture_atlas_size: 1024,
@@ -328,7 +350,6 @@ impl Default for KeyBindings {
     fn default() -> Self {
         let mut bindings = HashMap::new();
         
-        // Terminal shortcuts
         bindings.insert("new_tab".to_string(), KeyBinding {
             key: "t".to_string(),
             modifiers: vec![Modifier::Ctrl],
@@ -357,7 +378,6 @@ impl Default for KeyBindings {
             when: None,
         });
         
-        // Edit shortcuts
         bindings.insert("copy".to_string(), KeyBinding {
             key: "c".to_string(),
             modifiers: vec![Modifier::Ctrl],
@@ -379,7 +399,6 @@ impl Default for KeyBindings {
             when: None,
         });
         
-        // Application shortcuts
         bindings.insert("fullscreen".to_string(), KeyBinding {
             key: "F11".to_string(),
             modifiers: vec![],
@@ -407,4 +426,8 @@ impl Default for PluginConfig {
             allow_unsigned_plugins: false,
         }
     }
+}
+
+pub fn init() {
+    println!("config/preferences module loaded");
 }

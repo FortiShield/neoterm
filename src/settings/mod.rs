@@ -1,6 +1,12 @@
 use iced::{Element, widget::{column, row, text, button, container, scrollable, pick_list, slider, checkbox, text_input}};
 use crate::{Message, config::*};
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use crate::config::preferences::Preferences;
+use crate::config::theme::ThemeConfig;
+use crate::agent_mode_eval::ai_client::AiConfig;
 
 pub mod theme_editor;
 pub mod keybinding_editor;
@@ -102,6 +108,82 @@ pub enum ConfigChange {
     ClearHistoryOnExit(bool),
     IncognitoMode(bool),
     LogLevel(LogLevel),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    pub preferences: Preferences,
+    pub theme: ThemeConfig,
+    pub ai: AiConfig,
+    pub environment_profiles: HashMap<String, HashMap<String, String>>,
+    // Add other top-level configuration sections here
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            preferences: Preferences::default(),
+            theme: ThemeConfig::default(),
+            ai: AiConfig::default(),
+            environment_profiles: HashMap::new(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn load_from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let content = fs::read_to_string(path)?;
+        let settings: Settings = serde_yaml::from_str(&content)?;
+        Ok(settings)
+    }
+
+    pub fn save_to_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let content = serde_yaml::to_string(self)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn get_default_settings_path() -> PathBuf {
+        // Example: ~/.config/neoterm/settings.yaml or %APPDATA%/neoterm/settings.yaml
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("neoterm")
+            .join("settings.yaml")
+    }
+
+    pub fn get_themes_dir() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("neoterm")
+            .join("themes")
+    }
+
+    pub fn get_workflows_dir() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("neoterm")
+            .join("workflows")
+    }
+
+    pub fn get_environment_profiles_dir() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("neoterm")
+            .join("env_profiles")
+    }
+
+    pub fn ensure_settings_dirs_exist() -> Result<(), Box<dyn std::error::Error>> {
+        let settings_dir = Self::get_default_settings_path().parent().unwrap().to_path_buf();
+        fs::create_dir_all(&settings_dir)?;
+        fs::create_dir_all(Self::get_themes_dir())?;
+        fs::create_dir_all(Self::get_workflows_dir())?;
+        fs::create_dir_all(Self::get_environment_profiles_dir())?;
+        Ok(())
+    }
+}
+
+pub fn init() {
+    println!("settings module loaded");
 }
 
 pub struct SettingsView {

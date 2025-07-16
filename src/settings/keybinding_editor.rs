@@ -1,251 +1,175 @@
-use iced::{Element, widget::{column, row, text, button, text_input, scrollable}};
+use iced::{widget::{column, row, text, button, text_input, scrollable}, Element, Command, Length};
+use iced::keyboard::{KeyCode, Modifiers};
 use std::collections::HashMap;
-use crate::config::{KeyBindings, KeyBinding, Action, Modifier};
+use crate::input::Keybinding; // Assuming Keybinding is defined here
+use crate::settings::Settings; // Assuming Settings struct is defined
 
 #[derive(Debug, Clone)]
-pub struct KeyBindingEditor {
-    keybindings: KeyBindings,
-    editing_binding: Option<String>,
-    new_binding_name: String,
-    search_query: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum Message {
-    EditBinding(String),
-    UpdateBinding(String, KeyBinding),
-    DeleteBinding(String),
-    AddBinding,
-    NewBindingNameChanged(String),
-    SearchChanged(String),
-    ResetToDefaults,
+pub enum KeybindingEditorMessage {
+    KeybindingSelected(String), // Name of the action
+    NewKeyInputChanged(String),
+    SetKeybinding,
+    DeleteKeybinding(String),
     CancelEdit,
+    // Internal messages for key press detection
+    KeyPressed(KeyCode, Modifiers),
+    KeyReleased,
 }
 
-impl KeyBindingEditor {
-    pub fn new(keybindings: KeyBindings) -> Self {
-        Self {
-            keybindings,
-            editing_binding: None,
-            new_binding_name: String::new(),
-            search_query: String::new(),
+#[derive(Debug, Clone)]
+pub struct KeybindingEditor {
+    settings: Settings,
+    // Map from action name to its current keybinding
+    action_keybindings: HashMap<String, Option<Keybinding>>,
+    selected_action: Option<String>,
+    new_key_input: String,
+    // State for capturing new key presses
+    capturing_key: bool,
+    captured_key: Option<(KeyCode, Modifiers)>,
+}
+
+impl KeybindingEditor {
+    pub fn new(settings: Settings) -> Self {
+        let mut action_keybindings = HashMap::new();
+        // Populate with default/current keybindings from settings or a predefined list
+        // For demonstration, let's assume some actions
+        action_keybindings.insert("Toggle Command Palette".to_string(), Some(Keybinding::Single(KeyCode::P, Modifiers::COMMAND)));
+        action_keybindings.insert("Toggle AI Sidebar".to_string(), Some(Keybinding::Single(KeyCode::A, Modifiers::COMMAND)));
+        action_keybindings.insert("Run Benchmarks".to_string(), Some(Keybinding::Single(KeyCode::F1, Modifiers::NONE)));
+        action_keybindings.insert("Save File".to_string(), Some(Keybinding::Single(KeyCode::S, Modifiers::COMMAND)));
+        action_keybindings.insert("Open File".to_string(), Some(Keybinding::Single(KeyCode::O, Modifiers::COMMAND)));
+
+
+        KeybindingEditor {
+            settings,
+            action_keybindings,
+            selected_action: None,
+            new_key_input: String::new(),
+            capturing_key: false,
+            captured_key: None,
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Option<KeyBindings> {
+    pub fn update(&mut self, message: KeybindingEditorMessage) -> Command<KeybindingEditorMessage> {
         match message {
-            Message::EditBinding(name) => {
-                self.editing_binding = Some(name);
-                None
+            KeybindingEditorMessage::KeybindingSelected(action_name) => {
+                self.selected_action = Some(action_name);
+                self.new_key_input.clear();
+                self.capturing_key = true; // Start capturing key for this action
+                self.captured_key = None;
+                Command::none()
             }
-            Message::UpdateBinding(name, binding) => {
-                self.keybindings.bindings.insert(name, binding);
-                self.editing_binding = None;
-                Some(self.keybindings.clone())
+            KeybindingEditorMessage::NewKeyInputChanged(value) => {
+                self.new_key_input = value;
+                Command::none()
             }
-            Message::DeleteBinding(name) => {
-                self.keybindings.bindings.remove(&name);
-                Some(self.keybindings.clone())
-            }
-            Message::AddBinding => {
-                if !self.new_binding_name.is_empty() {
-                    let binding = KeyBinding {
-                        key: "".to_string(),
-                        modifiers: vec![],
-                        action: Action::Command("".to_string()),
-                        when: None,
-                    };
-                    self.keybindings.bindings.insert(self.new_binding_name.clone(), binding);
-                    self.new_binding_name.clear();
-                    Some(self.keybindings.clone())
-                } else {
-                    None
+            KeybindingEditorMessage::SetKeybinding => {
+                if let Some(action_name) = self.selected_action.take() {
+                    if let Some((key_code, modifiers)) = self.captured_key.take() {
+                        let new_binding = Keybinding::Single(key_code, modifiers);
+                        self.action_keybindings.insert(action_name.clone(), Some(new_binding));
+                        println!("Set keybinding for {}: {:?}", action_name, new_binding);
+                        // In a real app, save to settings file
+                    } else {
+                        println!("No key captured to set for action: {}", action_name);
+                    }
                 }
+                self.capturing_key = false;
+                self.new_key_input.clear();
+                Command::none()
             }
-            Message::NewBindingNameChanged(name) => {
-                self.new_binding_name = name;
-                None
+            KeybindingEditorMessage::DeleteKeybinding(action_name) => {
+                self.action_keybindings.insert(action_name.clone(), None);
+                println!("Deleted keybinding for {}", action_name);
+                // In a real app, save to settings file
+                Command::none()
             }
-            Message::SearchChanged(query) => {
-                self.search_query = query;
-                None
+            KeybindingEditorMessage::CancelEdit => {
+                self.selected_action = None;
+                self.new_key_input.clear();
+                self.capturing_key = false;
+                self.captured_key = None;
+                Command::none()
             }
-            Message::ResetToDefaults => {
-                self.keybindings = KeyBindings::default();
-                Some(self.keybindings.clone())
-            }
-            Message::CancelEdit => {
-                self.editing_binding = None;
-                None
-            }
-        }
-    }
-
-    pub fn view(&mut self) -> Element<Message> {
-        column![
-            text("Keybinding Editor").size(20),
-            text("Customize your keybindings here."),
-            // Search and add new binding
-            row![
-                text_input("Search bindings...", &self.search_query)
-                    .on_input(Message::SearchChanged)
-                    .width(iced::Length::Fill),
-                text_input("New binding name...", &self.new_binding_name)
-                    .on_input(Message::NewBindingNameChanged),
-                button("Add")
-                    .on_press(Message::AddBinding)
-            ].spacing(8),
-            
-            // Key bindings list
-            scrollable(
-                column(
-                    self.filtered_bindings()
-                        .into_iter()
-                        .map(|(name, binding)| self.create_binding_row(name, binding))
-                        .collect::<Vec<_>>()
-                )
-                .spacing(8)
-            ).height(iced::Length::Fixed(400.0)),
-            
-            // Actions
-            row![
-                button("Reset to Defaults")
-                    .on_press(Message::ResetToDefaults),
-            ].spacing(8),
-        ]
-        .spacing(16)
-        .into()
-    }
-
-    fn filtered_bindings(&self) -> Vec<(String, KeyBinding)> {
-        self.keybindings
-            .bindings
-            .iter()
-            .filter(|(name, _)| {
-                if self.search_query.is_empty() {
-                    true
-                } else {
-                    name.to_lowercase().contains(&self.search_query.to_lowercase())
+            KeybindingEditorMessage::KeyPressed(key_code, modifiers) => {
+                if self.capturing_key {
+                    self.captured_key = Some((key_code, modifiers));
+                    self.new_key_input = format!("{:?} + {:?}", modifiers, key_code);
+                    // Automatically set the keybinding after capture (optional, could require explicit click)
+                    // return Command::perform(async {}, |_| KeybindingEditorMessage::SetKeybinding);
                 }
-            })
-            .map(|(name, binding)| (name.clone(), binding.clone()))
-            .collect()
-    }
-
-    fn create_binding_row(&self, name: String, binding: KeyBinding) -> Element<Message> {
-        let is_editing = self.editing_binding.as_ref() == Some(&name);
-        
-        if is_editing {
-            self.create_editing_row(name, binding)
-        } else {
-            self.create_display_row(name, binding)
-        }
-    }
-
-    fn create_display_row(&self, name: String, binding: KeyBinding) -> Element<Message> {
-        let key_combo = self.format_key_combination(&binding);
-        let action_desc = self.format_action(&binding.action);
-        
-        iced::widget::container(
-            row![
-                text(&name).width(iced::Length::Fixed(150.0)),
-                text(key_combo).width(iced::Length::Fixed(150.0)),
-                text(action_desc).width(iced::Length::Fill),
-                button("Edit")
-                    .on_press(Message::EditBinding(name.clone())),
-                button("Delete")
-                    .on_press(Message::DeleteBinding(name.clone()))
-                    .style(button::danger),
-            ]
-            .spacing(8)
-            .align_items(iced::Alignment::Center)
-        )
-        .padding(8)
-        .style(|theme| iced::widget::container::Appearance {
-            background: Some(theme.palette().background.into()),
-            border: iced::Border {
-                color: theme.palette().text.scale_alpha(0.1),
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-    }
-
-    fn create_editing_row(&self, name: String, binding: KeyBinding) -> Element<Message> {
-        iced::widget::container(
-            column![
-                row![
-                    text("Name:").width(iced::Length::Fixed(80.0)),
-                    text(&name)
-                ].spacing(8),
-                
-                row![
-                    text("Key:").width(iced::Length::Fixed(80.0)),
-                    text_input("Key...", &binding.key)
-                ].spacing(8),
-                
-                row![
-                    text("Action:").width(iced::Length::Fixed(80.0)),
-                    text(self.format_action(&binding.action))
-                ].spacing(8),
-                
-                row![
-                    button("Save")
-                        .on_press(Message::UpdateBinding(name.clone(), binding)),
-                    button("Cancel")
-                        .on_press(Message::CancelEdit),
-                ].spacing(8),
-            ]
-            .spacing(8)
-        )
-        .padding(12)
-        .style(|theme| iced::widget::container::Appearance {
-            background: Some(theme.palette().primary.scale_alpha(0.1).into()),
-            border: iced::Border {
-                color: theme.palette().primary,
-                width: 2.0,
-                radius: 4.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-    }
-
-    fn format_key_combination(&self, binding: &KeyBinding) -> String {
-        let mut parts = Vec::new();
-        
-        for modifier in &binding.modifiers {
-            match modifier {
-                Modifier::Ctrl => parts.push("Ctrl"),
-                Modifier::Alt => parts.push("Alt"),
-                Modifier::Shift => parts.push("Shift"),
-                Modifier::Super => parts.push("Super"),
+                Command::none()
+            }
+            KeybindingEditorMessage::KeyReleased => {
+                // Can be used to finalize key capture if not done on KeyPressed
+                Command::none()
             }
         }
-        
-        if !binding.key.is_empty() {
-            parts.push(&binding.key);
-        }
-        
-        parts.join(" + ")
     }
 
-    fn format_action(&self, action: &Action) -> String {
-        match action {
-            Action::NewTab => "New Tab".to_string(),
-            Action::CloseTab => "Close Tab".to_string(),
-            Action::NextTab => "Next Tab".to_string(),
-            Action::PreviousTab => "Previous Tab".to_string(),
-            Action::Copy => "Copy".to_string(),
-            Action::Paste => "Paste".to_string(),
-            Action::Find => "Find".to_string(),
-            Action::ToggleFullscreen => "Toggle Fullscreen".to_string(),
-            Action::ToggleSettings => "Toggle Settings".to_string(),
-            Action::Quit => "Quit".to_string(),
-            Action::Command(cmd) => format!("Command: {}", cmd),
-            _ => "Unknown".to_string(),
+    pub fn view(&self) -> Element<KeybindingEditorMessage> {
+        let mut rows = column![
+            text("Keybinding Editor").size(24).width(Length::Fill),
+            text("Click an action to set/change its keybinding.").size(16).width(Length::Fill),
+            text("Press ESC to cancel key capture.").size(14).width(Length::Fill).style(iced::Color::from_rgb(0.5, 0.5, 0.5)),
+            iced::widget::horizontal_rule(1),
+        ].spacing(10);
+
+        let mut keybinding_list = column![].spacing(5);
+
+        for (action, binding_opt) in self.action_keybindings.iter() {
+            let binding_text = match binding_opt {
+                Some(Keybinding::Single(key, mods)) => format!("{:?} + {:?}", mods, key),
+                Some(Keybinding::Chord(k1, m1, k2, m2)) => format!("{:?} + {:?}, {:?} + {:?}", m1, k1, m2, k2),
+                None => "None".to_string(),
+            };
+
+            let action_button = button(text(action.clone()))
+                .on_press(KeybindingEditorMessage::KeybindingSelected(action.clone()))
+                .width(Length::FillPortion(2));
+
+            let current_binding_text = text(binding_text).width(Length::FillPortion(2));
+
+            let delete_button = button(text("Delete"))
+                .on_press(KeybindingEditorMessage::DeleteKeybinding(action.clone()))
+                .style(iced::theme::Button::Destructive)
+                .width(Length::Shrink);
+
+            keybinding_list = keybinding_list.push(
+                row![
+                    action_button,
+                    current_binding_text,
+                    delete_button,
+                ].spacing(10).align_items(iced::Alignment::Center)
+            );
         }
+
+        rows = rows.push(scrollable(keybinding_list).height(Length::FillPortion(1)));
+
+        if let Some(selected_action) = &self.selected_action {
+            let capture_ui = column![
+                text(format!("Setting keybinding for: {}", selected_action)).size(20),
+                text_input("Press new key combination...", &self.new_key_input)
+                    .on_input(KeybindingEditorMessage::NewKeyInputChanged)
+                    .width(Length::Fill)
+                    .padding(10)
+                    .size(18),
+                row![
+                    button(text("Set")).on_press(KeybindingEditorMessage::SetKeybinding),
+                    button(text("Cancel")).on_press(KeybindingEditorMessage::CancelEdit),
+                ].spacing(10)
+            ].spacing(10).padding(20).align_items(iced::Alignment::Center);
+            rows = rows.push(capture_ui);
+        }
+
+        rows.into()
     }
+
+    pub fn is_capturing_key(&self) -> bool {
+        self.capturing_key
+    }
+}
+
+pub fn init() {
+    println!("settings/keybinding_editor module loaded");
 }

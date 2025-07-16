@@ -274,13 +274,12 @@ impl AiClient {
                                                             }
                                                             if let Some(tool_calls_array) = delta["tool_calls"].as_array() {
                                                                 for tool_call_delta in tool_calls_array {
-                                                                    if let Some(index) = tool_call_delta["index"].as_u64() {
-                                                                        let id = tool_call_delta["id"].as_str().unwrap_or_default().to_string();
+                                                                    if let Some(id) = tool_call_delta["id"].as_str() {
                                                                         let name = tool_call_delta["function"]["name"].as_str().unwrap_or_default().to_string();
                                                                         let arguments_delta = tool_call_delta["function"]["arguments"].as_str().unwrap_or_default().to_string();
 
-                                                                        let entry = current_tool_calls.entry(id.clone()).or_insert_with(|| AgentToolCall {
-                                                                            id: id.clone(),
+                                                                        let entry = current_tool_calls.entry(id.to_string()).or_insert_with(|| AgentToolCall {
+                                                                            id: id.to_string(),
                                                                             name: name.clone(),
                                                                             arguments: serde_json::Value::String("".to_string()),
                                                                         });
@@ -406,11 +405,11 @@ impl AiClient {
                                                                     if block_type == "tool_use" {
                                                                         let id = content_block["id"].as_str().unwrap_or_default().to_string();
                                                                         let name = content_block["name"].as_str().unwrap_or_default().to_string();
-                                                                        // Arguments will come in subsequent content_block_delta events
+                                                                        let input = content_block["input"].clone(); // Claude sends full input on start
                                                                         let _ = tx.send(Ok(AIStreamChunk::ToolCall(vec![AgentToolCall {
                                                                             id,
                                                                             name,
-                                                                            arguments: serde_json::Value::String("".to_string()), // Will be filled by delta
+                                                                            arguments: input,
                                                                         }])));
                                                                     }
                                                                 }
@@ -418,8 +417,6 @@ impl AiClient {
                                                         },
                                                         "content_block_stop" => {
                                                             // Tool arguments are complete here, but we sent the tool_call on start.
-                                                            // A more complex state machine would be needed to accumulate arguments.
-                                                            // For now, we assume arguments are sent in one go or handled by the AI.
                                                         },
                                                         "message_stop" => {
                                                             let _ = tx.send(Ok(AIStreamChunk::Done));
@@ -675,13 +672,12 @@ impl AiClient {
                                                             }
                                                             if let Some(tool_calls_array) = delta["tool_calls"].as_array() {
                                                                 for tool_call_delta in tool_calls_array {
-                                                                    if let Some(index) = tool_call_delta["index"].as_u64() {
-                                                                        let id = tool_call_delta["id"].as_str().unwrap_or_default().to_string();
+                                                                    if let Some(id) = tool_call_delta["id"].as_str() {
                                                                         let name = tool_call_delta["function"]["name"].as_str().unwrap_or_default().to_string();
                                                                         let arguments_delta = tool_call_delta["function"]["arguments"].as_str().unwrap_or_default().to_string();
 
-                                                                        let entry = current_tool_calls.entry(id.clone()).or_insert_with(|| AgentToolCall {
-                                                                            id: id.clone(),
+                                                                        let entry = current_tool_calls.entry(id.to_string()).or_insert_with(|| AgentToolCall {
+                                                                            id: id.to_string(),
                                                                             name: name.clone(),
                                                                             arguments: serde_json::Value::String("".to_string()),
                                                                         });
