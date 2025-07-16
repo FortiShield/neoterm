@@ -20,6 +20,8 @@ pub use yaml_theme_manager::*;
 pub struct AppConfig {
     pub preferences: Preferences,
     pub env_profiles: EnvProfiles,
+    pub theme: ThemeConfig, // Added theme to AppConfig
+    pub keybindings: KeyBindings, // Added keybindings to AppConfig
     // Add other configuration sections here
 }
 
@@ -28,6 +30,8 @@ impl Default for AppConfig {
         Self {
             preferences: Preferences::default(),
             env_profiles: EnvProfiles::default(),
+            theme: ThemeConfig::default(), // Default theme
+            keybindings: KeyBindings::default(), // Default keybindings
         }
     }
 }

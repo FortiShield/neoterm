@@ -8,7 +8,7 @@ pub mod yaml_theme_ui;
 
 use theme_editor::ThemeEditor;
 use keybinding_editor::KeyBindingEditor;
-use yaml_theme_ui::YamlThemeEditor;
+use yaml_theme_ui::YamlThemeUI; // Changed from YamlThemeEditor to YamlThemeUI
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsTab {
@@ -27,9 +27,9 @@ pub enum SettingsTab {
 pub enum SettingsMessage {
     TabChanged(SettingsTab),
     ConfigChanged(ConfigChange),
-    ThemeChanged(String),
-    CustomThemeCreated(String),
-    KeyBindingChanged(String, KeyBinding),
+    ThemeChanged(String), // For selecting built-in themes
+    CustomThemeCreated(String), // For saving a new custom theme
+    KeyBindingChanged(String, KeyBinding), // For individual keybinding changes
     ResetToDefaults,
     ImportConfig,
     ExportConfig,
@@ -37,7 +37,7 @@ pub enum SettingsMessage {
     Cancel,
     ThemeEditor(theme_editor::Message),
     KeyBindingEditor(keybinding_editor::Message),
-    YamlThemeEditor(yaml_theme_ui::Message),
+    YamlThemeUI(yaml_theme_ui::Message), // Changed to YamlThemeUI
 
     // Environment Profile Management
     SelectEnvironmentProfile(String), // For setting active profile
@@ -109,11 +109,11 @@ pub struct SettingsView {
     pub config: AppConfig,
     pub theme_editor: ThemeEditor,
     pub keybinding_editor: KeyBindingEditor,
-    pub yaml_theme_editor: YamlThemeEditor,
+    pub yaml_theme_ui: YamlThemeUI, // Changed to YamlThemeUI
     pub unsaved_changes: bool,
     
     // Environment Profile Editor State
-    pub editing_env_profile: Option<EnvironmentProfile>,
+    pub editing_env_profile: Option<EnvProfile>, // Changed from EnvironmentProfile to EnvProfile
     pub editing_env_profile_original_name: Option<String>, // To track if it's a new profile or an edit
     pub env_profile_error: Option<String>, // For validation errors
 }
@@ -124,7 +124,10 @@ impl SettingsView {
             active_tab: SettingsTab::General,
             theme_editor: ThemeEditor::new(config.theme.clone()),
             keybinding_editor: KeyBindingEditor::new(config.keybindings.clone()),
-            yaml_theme_editor: YamlThemeEditor::new(),
+            yaml_theme_ui: YamlThemeUI::new().unwrap_or_else(|e| { // Handle error for YamlThemeUI
+                eprintln!("Failed to initialize YamlThemeUI: {}", e);
+                YamlThemeUI::new_empty() // Provide a fallback empty instance
+            }),
             config,
             unsaved_changes: false,
             editing_env_profile: None,
@@ -188,9 +191,11 @@ impl SettingsView {
                     self.unsaved_changes = true;
                 }
             }
-            SettingsMessage::YamlThemeEditor(msg) => {
-                self.yaml_theme_editor.update(msg);
-                // Potentially update config based on YAML theme changes
+            SettingsMessage::YamlThemeUI(msg) => { // Changed to YamlThemeUI
+                if let Some(theme) = self.yaml_theme_ui.update(msg) {
+                    self.config.theme = theme;
+                    self.unsaved_changes = true;
+                }
             }
             // Environment Profile Messages
             SettingsMessage::SelectEnvironmentProfile(name) => {
@@ -206,8 +211,7 @@ impl SettingsView {
                     }
                 } else {
                     // New profile
-                    self.editing_env_profile = Some(EnvironmentProfile {
-                        name: "New Profile".to_string(),
+                    self.editing_env_profile = Some(EnvProfile { // Changed to EnvProfile
                         variables: HashMap::new(),
                     });
                     self.editing_env_profile_original_name = None;
@@ -216,7 +220,8 @@ impl SettingsView {
             SettingsMessage::SaveEnvironmentProfile => {
                 if let Some(mut profile_to_save) = self.editing_env_profile.take() {
                     // Validate name
-                    if profile_to_save.name.trim().is_empty() {
+                    let profile_name = self.editing_env_profile_original_name.as_ref().unwrap_or(&profile_to_save.variables.get("name").cloned().unwrap_or_default()).clone();
+                    if profile_name.trim().is_empty() {
                         self.env_profile_error = Some("Profile name cannot be empty.".to_string());
                         self.editing_env_profile = Some(profile_to_save); // Restore for editing
                         return;
@@ -224,22 +229,22 @@ impl SettingsView {
                     
                     // Check for duplicate name if it's a new profile or name changed
                     if let Some(original_name) = &self.editing_env_profile_original_name {
-                        if original_name != &profile_to_save.name && self.config.env_profiles.profiles.contains_key(&profile_to_save.name) {
-                            self.env_profile_error = Some(format!("Profile with name '{}' already exists.", profile_to_save.name));
+                        if original_name != &profile_name && self.config.env_profiles.profiles.contains_key(&profile_name) {
+                            self.env_profile_error = Some(format!("Profile with name '{}' already exists.", profile_name));
                             self.editing_env_profile = Some(profile_to_save);
                             return;
                         }
                         // Remove old entry if name changed
-                        if original_name != &profile_to_save.name {
+                        if original_name != &profile_name {
                             self.config.env_profiles.profiles.remove(original_name);
                             // If the old profile was active, switch to the new one
                             if self.config.env_profiles.active_profile.as_ref() == Some(original_name) {
-                                self.config.env_profiles.active_profile = Some(profile_to_save.name.clone());
+                                self.config.env_profiles.active_profile = Some(profile_name.clone());
                             }
                         }
                     } else { // It's a new profile
-                        if self.config.env_profiles.profiles.contains_key(&profile_to_save.name) {
-                            self.env_profile_error = Some(format!("Profile with name '{}' already exists.", profile_to_save.name));
+                        if self.config.env_profiles.profiles.contains_key(&profile_name) {
+                            self.env_profile_error = Some(format!("Profile with name '{}' already exists.", profile_name));
                             self.editing_env_profile = Some(profile_to_save);
                             return;
                         }
@@ -248,7 +253,7 @@ impl SettingsView {
                     // Clean up empty variables
                     profile_to_save.variables.retain(|k, v| !k.trim().is_empty() || !v.trim().is_empty());
 
-                    self.config.env_profiles.profiles.insert(profile_to_save.name.clone(), profile_to_save);
+                    self.config.env_profiles.profiles.insert(profile_name.clone(), profile_to_save);
                     self.editing_env_profile_original_name = None;
                     self.unsaved_changes = true;
                     self.env_profile_error = None;
@@ -269,7 +274,7 @@ impl SettingsView {
             }
             SettingsMessage::EnvironmentProfileNameChanged(new_name) => {
                 if let Some(profile) = &mut self.editing_env_profile {
-                    profile.name = new_name;
+                    profile.variables.insert("name".to_string(), new_name);
                 }
             }
             SettingsMessage::EnvironmentVariableKeyChanged(index, new_key) => {
@@ -307,17 +312,59 @@ impl SettingsView {
         }
     }
 
+    fn apply_config_change(&mut self, change: ConfigChange) {
+        match change {
+            ConfigChange::StartupBehavior(behavior) => self.config.preferences.general.startup_behavior = behavior,
+            ConfigChange::DefaultShell(shell) => self.config.preferences.general.default_shell = Some(shell),
+            ConfigChange::WorkingDirectory(behavior) => self.config.preferences.general.working_directory = behavior,
+            ConfigChange::AutoUpdate(enabled) => self.config.preferences.general.auto_update = enabled,
+            ConfigChange::TelemetryEnabled(enabled) => self.config.preferences.general.telemetry_enabled = enabled,
+            ConfigChange::ScrollbackLines(lines) => self.config.preferences.terminal.scrollback_lines = lines,
+            ConfigChange::ScrollSensitivity(sensitivity) => self.config.preferences.terminal.scroll_sensitivity = sensitivity,
+            ConfigChange::MouseReporting(enabled) => self.config.preferences.terminal.mouse_reporting = enabled,
+            ConfigChange::CopyOnSelect(enabled) => self.config.preferences.terminal.copy_on_select = enabled,
+            ConfigChange::PasteOnRightClick(enabled) => self.config.preferences.terminal.paste_on_right_click = enabled,
+            ConfigChange::ConfirmBeforeClosing(enabled) => self.config.preferences.terminal.confirm_before_closing = enabled,
+            ConfigChange::BellBehavior(behavior) => self.config.preferences.terminal.bell_behavior = behavior,
+            ConfigChange::CursorStyle(style) => self.config.preferences.terminal.cursor_style = style,
+            ConfigChange::CursorBlink(enabled) => self.config.preferences.terminal.cursor_blink = enabled,
+            ConfigChange::VimMode(enabled) => self.config.preferences.editor.vim_mode = enabled,
+            ConfigChange::AutoSuggestions(enabled) => self.config.preferences.editor.auto_suggestions = enabled,
+            ConfigChange::SyntaxHighlighting(enabled) => self.config.preferences.editor.syntax_highlighting = enabled,
+            ConfigChange::AutoCompletion(enabled) => self.config.preferences.editor.auto_completion = enabled,
+            ConfigChange::IndentSize(size) => self.config.preferences.editor.indent_size = size,
+            ConfigChange::TabWidth(width) => self.config.preferences.editor.tab_width = width,
+            ConfigChange::InsertSpaces(enabled) => self.config.preferences.editor.insert_spaces = enabled,
+            ConfigChange::ShowTabBar(visibility) => self.config.preferences.ui.show_tab_bar = visibility,
+            ConfigChange::ShowTitleBar(enabled) => self.config.preferences.ui.show_title_bar = enabled,
+            ConfigChange::CompactMode(enabled) => self.config.preferences.ui.compact_mode = enabled,
+            ConfigChange::Transparency(value) => self.config.preferences.ui.transparency = value,
+            ConfigChange::BlurBackground(enabled) => self.config.preferences.ui.blur_background = enabled,
+            ConfigChange::AnimationsEnabled(enabled) => self.config.preferences.ui.animations_enabled = enabled,
+            ConfigChange::ZoomLevel(level) => self.config.preferences.ui.zoom_level = level,
+            ConfigChange::GpuAcceleration(enabled) => self.config.preferences.performance.gpu_acceleration = enabled,
+            ConfigChange::Vsync(enabled) => self.config.preferences.performance.vsync = enabled,
+            ConfigChange::MaxFps(fps) => self.config.preferences.performance.max_fps = fps,
+            ConfigChange::MemoryLimit(limit) => self.config.preferences.performance.memory_limit = limit,
+            ConfigChange::HistoryEnabled(enabled) => self.config.preferences.privacy.history_enabled = enabled,
+            ConfigChange::HistoryLimit(limit) => self.config.preferences.privacy.history_limit = limit,
+            ConfigChange::ClearHistoryOnExit(enabled) => self.config.preferences.privacy.clear_history_on_exit = enabled,
+            ConfigChange::IncognitoMode(enabled) => self.config.preferences.privacy.incognito_mode = enabled,
+            ConfigChange::LogLevel(level) => self.config.preferences.privacy.log_level = level,
+        }
+    }
+
     pub fn view(&mut self) -> Element<SettingsMessage> {
         let tabs = row![
             button(text("General")).on_press(SettingsMessage::TabChanged(SettingsTab::General)),
             button(text("Appearance")).on_press(SettingsMessage::TabChanged(SettingsTab::Appearance)),
-            button(text("Terminal")).on_press(SettingsMessage::TabChanged(SettingsTab::Terminal)),
-            button(text("Editor")).on_press(SettingsMessage::TabChanged(SettingsTab::Editor)),
-            button(text("Key Bindings")).on_press(SettingsMessage::TabChanged(SettingsTab::KeyBindings)),
-            button(text("Performance")).on_press(SettingsMessage::TabChanged(SettingsTab::Performance)),
-            button(text("Privacy")).on_press(SettingsMessage::TabChanged(SettingsTab::Privacy)),
-            button(text("Plugins")).on_press(SettingsMessage::TabChanged(SettingsTab::Plugins)),
-            button(text("Environment Profiles")).on_press(SettingsMessage::TabChanged(SettingsTab::EnvironmentProfiles)),
+            button(text("Terminal")).on_press(SettingsTab::Terminal),
+            button(text("Editor")).on_press(SettingsTab::Editor),
+            button(text("Key Bindings")).on_press(SettingsTab::KeyBindings),
+            button(text("Performance")).on_press(SettingsTab::Performance),
+            button(text("Privacy")).on_press(SettingsTab::Privacy),
+            button(text("Plugins")).on_press(SettingsTab::Plugins),
+            button(text("Environment Profiles")).on_press(SettingsTab::EnvironmentProfiles),
         ]
         .spacing(10);
 
@@ -337,7 +384,11 @@ impl SettingsView {
             text("Settings").size(30),
             tabs,
             content,
-            button(text("Save")).on_press(SettingsMessage::Save)
+            row![
+                button(text("Save")).on_press(SettingsMessage::Save),
+                button(text("Cancel")).on_press(SettingsMessage::Cancel),
+                button(text("Reset to Defaults")).on_press(SettingsMessage::ResetToDefaults),
+            ].spacing(10)
         ]
         .spacing(20)
         .padding(20)
@@ -354,6 +405,7 @@ impl SettingsView {
                     vec![
                         StartupBehavior::NewSession,
                         StartupBehavior::RestoreLastSession,
+                        StartupBehavior::CustomCommand("".to_string()), // Placeholder for custom command
                     ],
                     Some(self.config.preferences.general.startup_behavior.clone()),
                     |behavior| SettingsMessage::ConfigChanged(ConfigChange::StartupBehavior(behavior))
@@ -391,7 +443,7 @@ impl SettingsView {
         .into()
     }
 
-    fn create_appearance_settings(&self) -> Element<SettingsMessage> {
+    fn create_appearance_settings(&mut self) -> Element<SettingsMessage> {
         let theme_names: Vec<String> = ThemeConfig::builtin_themes()
             .into_iter()
             .map(|t| t.name)
@@ -415,11 +467,12 @@ impl SettingsView {
                     "Font name...",
                     &self.config.theme.typography.font_family
                 )
+                .on_input(|_font| SettingsMessage::ConfigChanged(ConfigChange::AutoUpdate(true))) // Placeholder
             ].spacing(8),
             
             row![
                 text("Font Size:").width(iced::Length::Fixed(150.0)),
-                slider(8.0..=24.0, self.config.theme.typography.font_size, |size| {
+                slider(8.0..=24.0, self.config.preferences.font_size as f32, |size| {
                     // This would need to be handled differently in a real implementation
                     SettingsMessage::ConfigChanged(ConfigChange::AutoUpdate(true)) // Placeholder
                 })
@@ -447,6 +500,8 @@ impl SettingsView {
             // Theme editor section
             text("Custom Theme Editor").size(16),
             self.theme_editor.view().map(SettingsMessage::ThemeEditor),
+            text("YAML Theme Management").size(16),
+            self.yaml_theme_ui.view().map(SettingsMessage::YamlThemeUI), // Changed to YamlThemeUI
         ]
         .spacing(16)
         .into()
@@ -559,7 +614,7 @@ impl SettingsView {
         .into()
     }
 
-    fn create_keybinding_settings(&self) -> Element<SettingsMessage> {
+    fn create_keybinding_settings(&mut self) -> Element<SettingsMessage> {
         column![
             text("Key Bindings").size(20),
             self.keybinding_editor.view().map(SettingsMessage::KeyBindingEditor),
@@ -651,7 +706,8 @@ impl SettingsView {
         ].spacing(16);
 
         // List of profiles
-        let profile_names: Vec<String> = self.config.env_profiles.profiles.keys().cloned().collect();
+        let mut profile_names: Vec<String> = self.config.env_profiles.profiles.keys().cloned().collect();
+        profile_names.sort(); // Sort profiles alphabetically
         let active_profile_name = self.config.env_profiles.active_profile.clone();
 
         content = content.push(
@@ -691,21 +747,24 @@ impl SettingsView {
 
         // Environment Profile Editor
         if let Some(editing_profile) = &self.editing_env_profile {
+            let profile_name_val = editing_profile.variables.get("name").cloned().unwrap_or_default();
             let mut editor_column = column![
-                text(format!("Editing Profile: {}", editing_profile.name)).size(18),
+                text(format!("Editing Profile: {}", profile_name_val)).size(18),
                 row![
                     text("Profile Name:").width(iced::Length::Fixed(120.0)),
                     text_input(
                         "Profile Name",
-                        &editing_profile.name
+                        &profile_name_val
                     )
                     .on_input(SettingsMessage::EnvironmentProfileNameChanged)
                 ].spacing(8),
                 text("Variables:").size(16),
             ].spacing(10);
 
-            // Sort variables for consistent display
-            let mut sorted_vars: Vec<(&String, &String)> = editing_profile.variables.iter().collect();
+            // Sort variables for consistent display, excluding "name"
+            let mut sorted_vars: Vec<(&String, &String)> = editing_profile.variables.iter()
+                .filter(|(k, _)| k.as_str() != "name")
+                .collect();
             sorted_vars.sort_by_key(|(k, _)| *k);
 
             for (index, (key, value)) in sorted_vars.iter().enumerate() {
