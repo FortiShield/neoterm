@@ -1,23 +1,30 @@
-/// This module would contain macros for embedding binary assets directly into the executable.
-/// This is useful for bundling resources like images, fonts, or configuration files
-/// that are needed at runtime without requiring external file paths.
+// This module would contain macros for embedding assets directly into the binary.
+// For example, using `include_bytes!` or `include_str!`.
+// This is a placeholder for future implementation.
+
+/// A macro to embed a file as bytes at compile time.
 ///
-/// Example usage (conceptual):
-/// ```ignore
-/// // In your Cargo.toml:
-/// // [build-dependencies]
-/// // asset_macro_builder = "..." // A build script helper crate
+/// Usage: `asset_bytes!("path/to/asset.png")`
+#[macro_export]
+macro_rules! asset_bytes {
+    ($path:expr) => {
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path))
+    };
+}
+
+/// A macro to embed a file as a string at compile time.
 ///
-/// // In your build.rs:
-/// // fn main() {
-/// //     asset_macro_builder::generate_asset_macro("path/to/assets", "my_assets");
-/// // }
-///
-/// // In your Rust code:
-/// // use crate::my_assets;
-/// // let image_bytes = my_assets::get_asset("logo.png");
-/// // let config_str = my_assets::get_asset_str("config.json");
-/// ```
+/// Usage: `asset_str!("path/to/text.txt")`
+#[macro_export]
+macro_rules! asset_str {
+    ($path:expr) => {
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/", $path))
+    };
+}
+
 pub fn init() {
-    println!("asset_macro module initialized: Designed for embedding binary assets.");
+    log::info!("Asset macro module initialized.");
+    // No runtime initialization needed for macros, but this function
+    // can be used for any setup if the module evolves to include
+    // runtime asset management (e.g., loading from external sources).
 }

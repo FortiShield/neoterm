@@ -1,9 +1,12 @@
 use iced::{Element, widget::{column, row, text, button, text_input, pick_list, container, scrollable}, Length};
 use iced::Color;
 use std::collections::HashMap;
-use crate::config::{ThemeConfig, TerminalColors};
-use crate::config::yaml_theme_manager::YamlThemeManager;
+use crate::config::{ThemeConfig, TerminalColors, ConfigManager, theme::Theme, yaml_theme::YamlTheme};
 use crate::settings::Settings;
+use anyhow::{Result, anyhow};
+use tokio::fs;
+use std::sync::Arc;
+use log::info;
 
 #[derive(Debug, Clone)]
 pub enum ThemeEditorMessage {
@@ -20,8 +23,8 @@ pub enum ThemeEditorMessage {
 
 #[derive(Debug, Clone)]
 pub struct ThemeEditor {
-    settings: Settings,
-    yaml_theme_manager: YamlThemeManager,
+    config_manager: Arc<ConfigManager>,
+    // No direct state needed here, as themes are managed by ConfigManager/YamlThemeManager
     available_themes: Vec<String>,
     selected_theme_name: Option<String>,
     current_theme_config: ThemeConfig, // The theme currently being edited
@@ -30,39 +33,72 @@ pub struct ThemeEditor {
 }
 
 impl ThemeEditor {
-    pub fn new(settings: Settings, theme_dir: std::path::PathBuf) -> Self {
-        let mut manager = YamlThemeManager::new(theme_dir);
-        let _ = manager.load_themes(); // Load themes on startup
-        let available_themes = manager.get_available_theme_names();
-
-        let default_theme_name = settings.theme.name.clone();
-        let current_theme_config = manager.get_theme_config(&default_theme_name)
-            .unwrap_or_else(ThemeConfig::default);
-
-        Self {
-            settings,
-            yaml_theme_manager: manager,
-            available_themes,
-            selected_theme_name: Some(default_theme_name),
-            current_theme_config,
+    pub fn new(config_manager: Arc<ConfigManager>) -> Self {
+        let mut editor = Self {
+            config_manager,
+            available_themes: Vec::new(),
+            selected_theme_name: None,
+            current_theme_config: ThemeConfig::default(),
             new_custom_color_name: String::new(),
             new_custom_color_value: String::new(),
+        };
+        editor.init().await.unwrap();
+        editor
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        info!("Theme editor initialized.");
+        self.available_themes = self.get_all_theme_names().await?;
+        self.selected_theme_name = Some(self.get_active_theme_name().await);
+        self.current_theme_config = self.get_theme_by_name(&self.selected_theme_name.clone().unwrap()).await?.into();
+        Ok(())
+    }
+
+    pub async fn get_all_theme_names(&self) -> Vec<String> {
+        self.config_manager.get_theme_manager().await.list_themes().await
+    }
+
+    pub async fn get_theme_by_name(&self, name: &str) -> Result<Theme> {
+        self.config_manager.get_theme_manager().await.get_theme(name).await
+    }
+
+    pub async fn save_theme(&self, theme: Theme) -> Result<()> {
+        self.config_manager.get_theme_manager().await.save_theme(theme).await
+    }
+
+    pub async fn delete_theme(&self, name: &str) -> Result<()> {
+        self.config_manager.get_theme_manager().await.delete_theme(name).await
+    }
+
+    pub async fn set_active_theme(&self, name: &str) -> Result<()> {
+        let mut prefs = self.config_manager.get_preferences().await;
+        if prefs.theme_name != name {
+            // Verify theme exists before setting
+            self.config_manager.get_theme_manager().await.get_theme(name).await?;
+            prefs.theme_name = name.to_string();
+            self.config_manager.update_preferences(prefs).await?;
+            info!("Active theme set to: {}", name);
         }
+        Ok(())
+    }
+
+    pub async fn get_active_theme_name(&self) -> String {
+        self.config_manager.get_preferences().await.theme_name
     }
 
     pub fn update(&mut self, message: ThemeEditorMessage) -> Command<ThemeEditorMessage> {
         match message {
             ThemeEditorMessage::LoadThemes => {
-                let _ = self.yaml_theme_manager.load_themes();
-                self.available_themes = self.yaml_theme_manager.get_available_theme_names();
+                // Update available themes
+                self.available_themes = self.get_all_theme_names().await.unwrap();
                 Command::none()
             }
             ThemeEditorMessage::SelectTheme(name) => {
-                if let Some(theme_config) = self.yaml_theme_manager.get_theme_config(&name) {
+                if let Some(theme_config) = self.get_theme_by_name(&name).await.ok().map(|t| t.into()) {
                     self.selected_theme_name = Some(name);
                     self.current_theme_config = theme_config;
                     // Update main settings struct as well
-                    self.settings.theme = self.current_theme_config.clone();
+                    self.config_manager.get_preferences().await.theme = self.current_theme_config.clone();
                 }
                 Command::none()
             }
@@ -95,15 +131,13 @@ impl ThemeEditor {
                     }
                 }
                 // Update main settings struct as well
-                self.settings.theme = self.current_theme_config.clone();
+                self.config_manager.get_preferences().await.theme = self.current_theme_config.clone();
                 Command::none()
             }
             ThemeEditorMessage::SaveTheme => {
-                // In a real application, you'd save self.current_theme_config
-                // to a YAML file in the themes directory.
-                println!("Saving theme: {}", self.current_theme_config.name);
-                // For now, just update the settings struct
-                self.settings.theme = self.current_theme_config.clone();
+                // Convert current_theme_config to Theme and save it
+                let theme: Theme = self.current_theme_config.clone().into();
+                self.save_theme(theme).await.unwrap();
                 Command::none()
             }
             ThemeEditorMessage::NewCustomColorNameChanged(name) => {
@@ -123,14 +157,14 @@ impl ThemeEditor {
                     self.new_custom_color_name.clear();
                     self.new_custom_color_value.clear();
                     // Update main settings struct as well
-                    self.settings.theme = self.current_theme_config.clone();
+                    self.config_manager.get_preferences().await.theme = self.current_theme_config.clone();
                 }
                 Command::none()
             }
             ThemeEditorMessage::DeleteCustomColor(color_name) => {
                 self.current_theme_config.colors.remove(&color_name);
                 // Update main settings struct as well
-                self.settings.theme = self.current_theme_config.clone();
+                self.config_manager.get_preferences().await.theme = self.current_theme_config.clone();
                 Command::none()
             }
         }
@@ -175,7 +209,6 @@ impl ThemeEditor {
             ].spacing(10)
         ].spacing(10).padding(10).into();
 
-
         column![
             theme_selector,
             iced::widget::horizontal_rule(1),
@@ -204,10 +237,6 @@ impl ThemeEditor {
                 .width(Length::Shrink)
                 .into(),
         ].spacing(10).align_items(iced::Alignment::Center).into()
-    }
-
-    pub fn get_updated_settings(&self) -> &Settings {
-        &self.settings
     }
 }
 
@@ -244,5 +273,5 @@ impl iced::widget::container::StyleSheet for ColorPreviewStyle {
 }
 
 pub fn init() {
-    println!("settings/theme_editor module loaded");
+    info!("settings/theme_editor module loaded");
 }

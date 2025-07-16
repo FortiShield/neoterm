@@ -1,7 +1,18 @@
-use pulldown_cmark::{Parser, Options, Event, Tag};
+use pulldown_cmark::{Parser, Options, Event, Tag, html};
 use std::fmt;
+use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use log::info;
 
 /// Represents a parsed Markdown document, potentially as a tree or a sequence of renderable elements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkdownDocument {
+    pub content: String,
+    pub html_output: String,
+    pub metadata: Option<serde_json::Value>, // For front matter parsing
+}
+
+/// Represents a parsed Markdown element.
 #[derive(Debug, Clone)]
 pub enum MarkdownElement {
     Heading(u32, String), // Level, Text
@@ -17,24 +28,49 @@ pub enum MarkdownElement {
 
 /// A parser for Markdown content, converting it into a structured representation.
 pub struct MarkdownParser {
-    options: Options,
+    // No internal state needed for basic parsing, but could hold
+    // configuration for extensions, themes, etc.
 }
 
 impl MarkdownParser {
     /// Creates a new `MarkdownParser` instance with default options.
     pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Initializes the Markdown parser.
+    pub fn init(&self) {
+        info!("Markdown parser initialized.");
+    }
+
+    /// Parses a Markdown string into an HTML string.
+    pub fn parse_to_html(&self, markdown_input: &str) -> Result<MarkdownDocument> {
         let mut options = Options::empty();
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_FOOTNOTES);
         options.insert(Options::ENABLE_STRIKETHROUGH);
         options.insert(Options::ENABLE_TASKLISTS);
         options.insert(Options::ENABLE_SMART_PUNCTUATION);
-        Self { options }
+
+        let parser = Parser::new_ext(markdown_input, options);
+
+        let mut html_output = String::new();
+        html::push_html(&mut html_output, parser);
+
+        // Basic metadata extraction (e.g., for YAML front matter) would go here.
+        // For now, it's a placeholder.
+        let metadata = None;
+
+        Ok(MarkdownDocument {
+            content: markdown_input.to_string(),
+            html_output,
+            metadata,
+        })
     }
 
     /// Parses a Markdown string into a vector of `MarkdownElement`s.
     pub fn parse(&self, markdown_input: &str) -> Vec<MarkdownElement> {
-        let parser = Parser::new_ext(markdown_input, self.options);
+        let parser = Parser::new(markdown_input);
         let mut elements = Vec::new();
         let mut current_paragraph = String::new();
         let mut current_list_items = Vec::new();
@@ -206,6 +242,18 @@ impl MarkdownParser {
         }
         output
     }
+
+    /// Extracts plain text from Markdown (stripping formatting).
+    pub fn extract_plain_text(&self, markdown_input: &str) -> String {
+        let parser = Parser::new(markdown_input);
+        parser.into_iter().filter_map(|event| {
+            match event {
+                pulldown_cmark::Event::Text(text) => Some(text.to_string()),
+                pulldown_cmark::Event::Code(text) => Some(text.to_string()),
+                _ => None,
+            }
+        }).collect::<Vec<String>>().join("")
+    }
 }
 
 pub fn init() {
@@ -265,5 +313,20 @@ mod tests {
         assert!(rendered.contains("# Title\n"));
         assert!(rendered.contains("Some text.\n\n"));
         assert!(rendered.contains("\`\`\`\ncode\n\`\`\`\n"));
+    }
+
+    #[test]
+    fn test_markdown_parser_to_html() {
+        let markdown = "# Hello\n\nThis is a **paragraph** with `inline code`.\n\n\`\`\`rust\nfn main() {}\n\`\`\`\n\n- Item 1\n- Item 2\n\n---\n\n[Link](http://example.com)";
+        let parser = MarkdownParser::new();
+        let document = parser.parse_to_html(markdown).unwrap();
+        assert!(document.html_output.contains("<h1>Hello</h1>"));
+        assert!(document.html_output.contains("<p>This is a <strong>paragraph</strong> with <code>inline code</code>.</p>"));
+        assert!(document.html_output.contains("<pre><code class=\"language-rust\">fn main() {}</code></pre>"));
+        assert!(document.html_output.contains("<ul>"));
+        assert!(document.html_output.contains("<li>Item 1</li>"));
+        assert!(document.html_output.contains("<li>Item 2</li>"));
+        assert!(document.html_output.contains("<hr>"));
+        assert!(document.html_output.contains("<a href=\"http://example.com\">Link</a>"));
     }
 }

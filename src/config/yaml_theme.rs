@@ -2,85 +2,50 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::config::{ThemeConfig, ColorScheme, ColorValue, AnsiColors, Typography, Effects, Spacing};
 use iced;
+use anyhow::Result;
+use super::theme::Theme;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlTheme {
     pub name: String,
-    pub author: Option<String>,
-    pub description: Option<String>,
-    pub colors: YamlThemeColors,
+    pub description: String,
+    #[serde(default)]
+    pub colors: HashMap<String, String>,
     #[serde(default)]
     pub syntax_highlighting: HashMap<String, String>,
+    #[serde(default)]
+    pub ui_elements: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct YamlThemeColors {
-    pub background: String,
-    pub foreground: String,
-    pub cursor: String,
-    pub selection: String,
-    #[serde(default)]
-    pub black: String,
-    #[serde(default)]
-    pub red: String,
-    #[serde(default)]
-    pub green: String,
-    #[serde(default)]
-    pub yellow: String,
-    #[serde(default)]
-    pub blue: String,
-    #[serde(default)]
-    pub magenta: String,
-    #[serde(default)]
-    pub cyan: String,
-    #[serde(default)]
-    pub white: String,
-    #[serde(default)]
-    pub bright_black: String,
-    #[serde(default)]
-    pub bright_red: String,
-    #[serde(default)]
-    pub bright_green: String,
-    #[serde(default)]
-    pub bright_yellow: String,
-    #[serde(default)]
-    pub bright_blue: String,
-    #[serde(default)]
-    pub bright_magenta: String,
-    #[serde(default)]
-    pub bright_cyan: String,
-    #[serde(default)]
-    pub bright_white: String,
-    // Additional custom colors can be added here
-    #[serde(flatten)]
-    pub custom: HashMap<String, String>,
+impl From<YamlTheme> for Theme {
+    fn from(yaml_theme: YamlTheme) -> Self {
+        let mut colors = HashMap::new();
+        colors.extend(yaml_theme.colors);
+        
+        let mut syntax_highlighting = HashMap::new();
+        syntax_highlighting.extend(yaml_theme.syntax_highlighting);
+
+        let mut ui_elements = HashMap::new();
+        ui_elements.extend(yaml_theme.ui_elements);
+
+        Theme {
+            name: yaml_theme.name,
+            description: yaml_theme.description,
+            colors,
+            syntax_highlighting,
+            ui_elements,
+        }
+    }
 }
 
-impl Default for YamlThemeColors {
-    fn default() -> Self {
-        // Default values for standard ANSI colors if not specified in YAML
-        YamlThemeColors {
-            background: "#000000".to_string(),
-            foreground: "#FFFFFF".to_string(),
-            cursor: "#FFFFFF".to_string(),
-            selection: "#555555".to_string(),
-            black: "#000000".to_string(),
-            red: "#CD3131".to_string(),
-            green: "#0BCB0B".to_string(),
-            yellow: "#E5E510".to_string(),
-            blue: "#2472C8".to_string(),
-            magenta: "#BC3FBC".to_string(),
-            cyan: "#0ADBBF".to_string(),
-            white: "#E5E5E5".to_string(),
-            bright_black: "#666666".to_string(),
-            bright_red: "#F14C4C".to_string(),
-            bright_green: "#17A717".to_string(),
-            bright_yellow: "#F5F543".to_string(),
-            bright_blue: "#3B8EEA".to_string(),
-            bright_magenta: "#D670D6".to_string(),
-            bright_cyan: "#1ADCEF".to_string(),
-            bright_white: "#FFFFFF".to_string(),
-            custom: HashMap::new(),
+impl From<Theme> for YamlTheme {
+    fn from(theme: Theme) -> Self {
+        Self {
+            name: theme.name,
+            description: theme.description,
+            colors: theme.colors,
+            syntax_highlighting: theme.syntax_highlighting,
+            ui_elements: theme.ui_elements,
         }
     }
 }
@@ -116,52 +81,52 @@ impl YamlTheme {
     /// Convert to internal ThemeConfig
     pub fn to_theme_config(&self) -> Result<ThemeConfig, YamlThemeError> {
         let colors = ColorScheme {
-            background: parse_color(&self.colors.background)?,
+            background: parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string()))?,
             surface: self.derive_surface_color()?,
             surface_variant: self.derive_surface_variant_color()?,
             
-            text: parse_color(&self.colors.foreground)?,
+            text: parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?,
             text_secondary: self.derive_text_secondary()?,
             text_disabled: self.derive_text_disabled()?,
             
-            terminal_background: parse_color(&self.colors.background)?,
-            terminal_foreground: parse_color(&self.colors.foreground)?,
-            terminal_cursor: parse_color(&self.colors.cursor).unwrap_or_default(),
-            terminal_selection: parse_color(&self.colors.selection).unwrap_or_default(),
+            terminal_background: parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string()))?,
+            terminal_foreground: parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?,
+            terminal_cursor: parse_color(&self.colors.get("cursor").unwrap_or(&"#FFFFFF".to_string())).unwrap_or_default(),
+            terminal_selection: parse_color(&self.colors.get("selection").unwrap_or(&"#555555".to_string())).unwrap_or_default(),
             
             ansi_colors: AnsiColors {
-                black: parse_color(&self.colors.black)?,
-                red: parse_color(&self.colors.red)?,
-                green: parse_color(&self.colors.green)?,
-                yellow: parse_color(&self.colors.yellow)?,
-                blue: parse_color(&self.colors.blue)?,
-                magenta: parse_color(&self.colors.magenta)?,
-                cyan: parse_color(&self.colors.cyan)?,
-                white: parse_color(&self.colors.white)?,
+                black: parse_color(&self.colors.get("black").unwrap_or(&"#000000".to_string()))?,
+                red: parse_color(&self.colors.get("red").unwrap_or(&"#CD3131".to_string()))?,
+                green: parse_color(&self.colors.get("green").unwrap_or(&"#0BCB0B".to_string()))?,
+                yellow: parse_color(&self.colors.get("yellow").unwrap_or(&"#E5E510".to_string()))?,
+                blue: parse_color(&self.colors.get("blue").unwrap_or(&"#2472C8".to_string()))?,
+                magenta: parse_color(&self.colors.get("magenta").unwrap_or(&"#BC3FBC".to_string()))?,
+                cyan: parse_color(&self.colors.get("cyan").unwrap_or(&"#0ADBBF".to_string()))?,
+                white: parse_color(&self.colors.get("white").unwrap_or(&"#E5E5E5".to_string()))?,
                 
-                bright_black: parse_color(&self.colors.bright_black)?,
-                bright_red: parse_color(&self.colors.bright_red)?,
-                bright_green: parse_color(&self.colors.bright_green)?,
-                bright_yellow: parse_color(&self.colors.bright_yellow)?,
-                bright_blue: parse_color(&self.colors.bright_blue)?,
-                bright_magenta: parse_color(&self.colors.bright_magenta)?,
-                bright_cyan: parse_color(&self.colors.bright_cyan)?,
-                bright_white: parse_color(&self.colors.bright_white)?,
+                bright_black: parse_color(&self.colors.get("bright_black").unwrap_or(&"#666666".to_string()))?,
+                bright_red: parse_color(&self.colors.get("bright_red").unwrap_or(&"#F14C4C".to_string()))?,
+                bright_green: parse_color(&self.colors.get("bright_green").unwrap_or(&"#17A717".to_string()))?,
+                bright_yellow: parse_color(&self.colors.get("bright_yellow").unwrap_or(&"#F5F543".to_string()))?,
+                bright_blue: parse_color(&self.colors.get("bright_blue").unwrap_or(&"#3B8EEA".to_string()))?,
+                bright_magenta: parse_color(&self.colors.get("bright_magenta").unwrap_or(&"#D670D6".to_string()))?,
+                bright_cyan: parse_color(&self.colors.get("bright_cyan").unwrap_or(&"#1ADCEF".to_string()))?,
+                bright_white: parse_color(&self.colors.get("bright_white").unwrap_or(&"#FFFFFF".to_string()))?,
             },
             
-            primary: parse_color(&self.colors.foreground)?,
-            secondary: parse_color(&self.colors.background)?,
-            accent: parse_color(&self.colors.foreground)?,
-            success: parse_color(&self.colors.green)?,
-            warning: parse_color(&self.colors.yellow)?,
-            error: parse_color(&self.colors.red)?,
+            primary: parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?,
+            secondary: parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string()))?,
+            accent: parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?,
+            success: parse_color(&self.colors.get("green").unwrap_or(&"#0BCB0B".to_string()))?,
+            warning: parse_color(&self.colors.get("yellow").unwrap_or(&"#E5E510".to_string()))?,
+            error: parse_color(&self.colors.get("red").unwrap_or(&"#CD3131".to_string()))?,
             
             hover: self.derive_hover_color()?,
             active: self.derive_active_color()?,
             focus: self.derive_focus_color()?,
             disabled: self.derive_disabled_color()?,
             
-            border: parse_color(&self.colors.foreground)?,
+            border: parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?,
             divider: self.derive_divider_color()?,
         };
 
@@ -208,80 +173,42 @@ impl YamlTheme {
     pub fn from_theme_config(theme: &ThemeConfig) -> Self {
         Self {
             name: theme.name.clone(),
-            author: None,
-            description: None,
-            colors: YamlThemeColors {
-                background: color_to_hex(&theme.colors.background),
-                foreground: color_to_hex(&theme.colors.text),
-                cursor: color_to_hex(&theme.colors.primary),
-                selection: color_to_hex(&theme.colors.secondary),
-                black: color_to_hex(&theme.colors.ansi_colors.black),
-                red: color_to_hex(&theme.colors.ansi_colors.red),
-                green: color_to_hex(&theme.colors.ansi_colors.green),
-                yellow: color_to_hex(&theme.colors.ansi_colors.yellow),
-                blue: color_to_hex(&theme.colors.ansi_colors.blue),
-                magenta: color_to_hex(&theme.colors.ansi_colors.magenta),
-                cyan: color_to_hex(&theme.colors.ansi_colors.cyan),
-                white: color_to_hex(&theme.colors.ansi_colors.white),
-                bright_black: color_to_hex(&theme.colors.ansi_colors.bright_black),
-                bright_red: color_to_hex(&theme.colors.ansi_colors.bright_red),
-                bright_green: color_to_hex(&theme.colors.ansi_colors.bright_green),
-                bright_yellow: color_to_hex(&theme.colors.ansi_colors.bright_yellow),
-                bright_blue: color_to_hex(&theme.colors.ansi_colors.bright_blue),
-                bright_magenta: color_to_hex(&theme.colors.ansi_colors.bright_magenta),
-                bright_cyan: color_to_hex(&theme.colors.ansi_colors.bright_cyan),
-                bright_white: color_to_hex(&theme.colors.ansi_colors.bright_white),
-                custom: HashMap::new(),
-            },
-            font: Some(FontConfig {
-                family: Some(theme.typography.font_family.clone()),
-                size: Some(theme.typography.font_size),
-                weight: None,
-                style: None,
-                line_height: Some(theme.typography.line_height),
-                letter_spacing: Some(theme.typography.letter_spacing),
-            }),
-            effects: Some(EffectConfig {
-                border_radius: Some(theme.effects.border_radius),
-                shadow_blur: Some(theme.effects.shadow_blur),
-                shadow_offset: Some(theme.effects.shadow_offset),
-                transparency: None,
-                blur: None,
-                animations: None,
-            }),
+            description: "".to_string(),
+            colors: theme.colors.iter().map(|(k, v)| (k.clone(), color_to_hex(v))).collect(),
             syntax_highlighting: HashMap::new(),
+            ui_elements: HashMap::new(),
         }
     }
 
     /// Validate theme completeness and correctness
     pub fn validate(&self) -> Result<(), YamlThemeError> {
         // Check required fields
-        parse_color(&self.colors.background).map_err(|_| YamlThemeError::InvalidColor("background".to_string()))?;
-        parse_color(&self.colors.foreground).map_err(|_| YamlThemeError::InvalidColor("foreground".to_string()))?;
-        parse_color(&self.colors.cursor).map_err(|_| YamlThemeError::InvalidColor("cursor".to_string()))?;
-        parse_color(&self.colors.selection).map_err(|_| YamlThemeError::InvalidColor("selection".to_string()))?;
-        parse_color(&self.colors.black).map_err(|_| YamlThemeError::InvalidColor("black".to_string()))?;
-        parse_color(&self.colors.red).map_err(|_| YamlThemeError::InvalidColor("red".to_string()))?;
-        parse_color(&self.colors.green).map_err(|_| YamlThemeError::InvalidColor("green".to_string()))?;
-        parse_color(&self.colors.yellow).map_err(|_| YamlThemeError::InvalidColor("yellow".to_string()))?;
-        parse_color(&self.colors.blue).map_err(|_| YamlThemeError::InvalidColor("blue".to_string()))?;
-        parse_color(&self.colors.magenta).map_err(|_| YamlThemeError::InvalidColor("magenta".to_string()))?;
-        parse_color(&self.colors.cyan).map_err(|_| YamlThemeError::InvalidColor("cyan".to_string()))?;
-        parse_color(&self.colors.white).map_err(|_| YamlThemeError::InvalidColor("white".to_string()))?;
-        parse_color(&self.colors.bright_black).map_err(|_| YamlThemeError::InvalidColor("bright_black".to_string()))?;
-        parse_color(&self.colors.bright_red).map_err(|_| YamlThemeError::InvalidColor("bright_red".to_string()))?;
-        parse_color(&self.colors.bright_green).map_err(|_| YamlThemeError::InvalidColor("bright_green".to_string()))?;
-        parse_color(&self.colors.bright_yellow).map_err(|_| YamlThemeError::InvalidColor("bright_yellow".to_string()))?;
-        parse_color(&self.colors.bright_blue).map_err(|_| YamlThemeError::InvalidColor("bright_blue".to_string()))?;
-        parse_color(&self.colors.bright_magenta).map_err(|_| YamlThemeError::InvalidColor("bright_magenta".to_string()))?;
-        parse_color(&self.colors.bright_white).map_err(|_| YamlThemeError::InvalidColor("bright_white".to_string()))?;
+        parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string())).map_err(|_| YamlThemeError::InvalidColor("background".to_string()))?;
+        parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string())).map_err(|_| YamlThemeError::InvalidColor("foreground".to_string()))?;
+        parse_color(&self.colors.get("cursor").unwrap_or(&"#FFFFFF".to_string())).map_err(|_| YamlThemeError::InvalidColor("cursor".to_string()))?;
+        parse_color(&self.colors.get("selection").unwrap_or(&"#555555".to_string())).map_err(|_| YamlThemeError::InvalidColor("selection".to_string()))?;
+        parse_color(&self.colors.get("black").unwrap_or(&"#000000".to_string())).map_err(|_| YamlThemeError::InvalidColor("black".to_string()))?;
+        parse_color(&self.colors.get("red").unwrap_or(&"#CD3131".to_string())).map_err(|_| YamlThemeError::InvalidColor("red".to_string()))?;
+        parse_color(&self.colors.get("green").unwrap_or(&"#0BCB0B".to_string())).map_err(|_| YamlThemeError::InvalidColor("green".to_string()))?;
+        parse_color(&self.colors.get("yellow").unwrap_or(&"#E5E510".to_string())).map_err(|_| YamlThemeError::InvalidColor("yellow".to_string()))?;
+        parse_color(&self.colors.get("blue").unwrap_or(&"#2472C8".to_string())).map_err(|_| YamlThemeError::InvalidColor("blue".to_string()))?;
+        parse_color(&self.colors.get("magenta").unwrap_or(&"#BC3FBC".to_string())).map_err(|_| YamlThemeError::InvalidColor("magenta".to_string()))?;
+        parse_color(&self.colors.get("cyan").unwrap_or(&"#0ADBBF".to_string())).map_err(|_| YamlThemeError::InvalidColor("cyan".to_string()))?;
+        parse_color(&self.colors.get("white").unwrap_or(&"#E5E5E5".to_string())).map_err(|_| YamlThemeError::InvalidColor("white".to_string()))?;
+        parse_color(&self.colors.get("bright_black").unwrap_or(&"#666666".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_black".to_string()))?;
+        parse_color(&self.colors.get("bright_red").unwrap_or(&"#F14C4C".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_red".to_string()))?;
+        parse_color(&self.colors.get("bright_green").unwrap_or(&"#17A717".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_green".to_string()))?;
+        parse_color(&self.colors.get("bright_yellow").unwrap_or(&"#F5F543".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_yellow".to_string()))?;
+        parse_color(&self.colors.get("bright_blue").unwrap_or(&"#3B8EEA".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_blue".to_string()))?;
+        parse_color(&self.colors.get("bright_magenta").unwrap_or(&"#D670D6".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_magenta".to_string()))?;
+        parse_color(&self.colors.get("bright_white").unwrap_or(&"#FFFFFF".to_string())).map_err(|_| YamlThemeError::InvalidColor("bright_white".to_string()))?;
 
         Ok(())
     }
 
     // Helper methods for deriving colors
     fn derive_surface_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.colors.background)?;
+        let bg = parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string()))?;
         Ok(if self.is_dark_theme() {
             lighten_color(&bg, 0.05)
         } else {
@@ -290,7 +217,7 @@ impl YamlTheme {
     }
 
     fn derive_surface_variant_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.colors.background)?;
+        let bg = parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string()))?;
         Ok(if self.is_dark_theme() {
             lighten_color(&bg, 0.1)
         } else {
@@ -299,7 +226,7 @@ impl YamlTheme {
     }
 
     fn derive_text_secondary(&self) -> Result<ColorValue, YamlThemeError> {
-        let fg = parse_color(&self.colors.foreground)?;
+        let fg = parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?;
         Ok(ColorValue {
             a: 0.7,
             ..fg
@@ -307,7 +234,7 @@ impl YamlTheme {
     }
 
     fn derive_text_disabled(&self) -> Result<ColorValue, YamlThemeError> {
-        let fg = parse_color(&self.colors.foreground)?;
+        let fg = parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?;
         Ok(ColorValue {
             a: 0.5,
             ..fg
@@ -331,7 +258,7 @@ impl YamlTheme {
     }
 
     fn derive_focus_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let accent = parse_color(&self.colors.foreground)?;
+        let accent = parse_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string()))?;
         Ok(ColorValue {
             a: 0.5,
             ..accent
@@ -343,7 +270,7 @@ impl YamlTheme {
     }
 
     fn derive_divider_color(&self) -> Result<ColorValue, YamlThemeError> {
-        let bg = parse_color(&self.colors.background)?;
+        let bg = parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string()))?;
         Ok(if self.is_dark_theme() {
             lighten_color(&bg, 0.15)
         } else {
@@ -352,7 +279,7 @@ impl YamlTheme {
     }
 
     fn is_dark_theme(&self) -> bool {
-        if let Ok(bg) = parse_color(&self.colors.background) {
+        if let Ok(bg) = parse_color(&self.colors.get("background").unwrap_or(&"#000000".to_string())) {
             // Calculate luminance
             let luminance = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
             luminance < 0.5
@@ -363,14 +290,22 @@ impl YamlTheme {
 
     pub fn to_iced_theme(&self) -> crate::config::theme::Theme {
         crate::config::theme::Theme {
-            background: parse_hex_color(&self.colors.background).unwrap_or(iced::Color::BLACK),
-            foreground: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::WHITE),
-            primary: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::BLUE),
-            secondary: parse_hex_color(&self.colors.background).unwrap_or(iced::Color::from_rgb8(100, 100, 100)),
-            danger: parse_hex_color(&self.colors.red).unwrap_or(iced::Color::RED),
-            text: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::BLACK),
-            border: parse_hex_color(&self.colors.foreground).unwrap_or(iced::Color::from_rgb8(200, 200, 200)),
+            background: parse_hex_color(&self.colors.get("background").unwrap_or(&"#000000".to_string())).unwrap_or(iced::Color::BLACK),
+            foreground: parse_hex_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string())).unwrap_or(iced::Color::WHITE),
+            primary: parse_hex_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string())).unwrap_or(iced::Color::BLUE),
+            secondary: parse_hex_color(&self.colors.get("background").unwrap_or(&"#646464".to_string())).unwrap_or(iced::Color::from_rgb8(100, 100, 100)),
+            danger: parse_hex_color(&self.colors.get("red").unwrap_or(&"#CD3131".to_string())).unwrap_or(iced::Color::RED),
+            text: parse_hex_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string())).unwrap_or(iced::Color::BLACK),
+            border: parse_hex_color(&self.colors.get("foreground").unwrap_or(&"#FFFFFF".to_string())).unwrap_or(iced::Color::from_rgb8(200, 200, 200)),
         }
+    }
+
+    pub fn load_from_str(s: &str) -> Result<Self> {
+        Ok(serde_yaml::from_str(s)?)
+    }
+
+    pub fn to_string(&self) -> Result<String> {
+        Ok(serde_yaml::to_string(self)?)
     }
 }
 
@@ -605,7 +540,6 @@ mod tests {
     fn test_yaml_theme_conversion() {
         let yaml_str = r#"
 name: "Test Theme"
-author: "John Doe"
 description: "A simple test theme"
 colors:
   background: "#2f343f"
@@ -628,15 +562,11 @@ colors:
   bright_magenta: "#d670d6"
   bright_cyan: "#1adcef"
   bright_white: "#ffffff"
-font:
-  family: "JetBrains Mono"
-  size: 14.0
-  line_height: 1.4
-  letter_spacing: 0.0
-effects:
-  border_radius: 8.0
-  shadow_blur: 4.0
-  shadow_offset: [0.0, 2.0]
+syntax_highlighting:
+  keyword: "#ff0000"
+  string: "#00ff00"
+ui_elements:
+  button: "#0000ff"
 "#;
 
         let theme = YamlTheme::from_yaml(yaml_str).unwrap();

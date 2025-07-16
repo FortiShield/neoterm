@@ -1,9 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::io;
 use std::fs;
+use anyhow::Result;
+use tokio::sync::mpsc;
+use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 
 /// Represents information about a mounted drive or file system.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveInfo {
     pub name: String,
     pub mount_point: PathBuf,
@@ -14,13 +18,105 @@ pub struct DriveInfo {
 }
 
 /// Manages drive-related operations, such as listing, mounting, and unmounting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DriveProvider {
+    GoogleDrive,
+    OneDrive,
+    Dropbox,
+    LocalDisk, // For managing local disk space
+    // Add more providers
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveConfig {
+    pub provider: DriveProvider,
+    pub credentials: HashMap<String, String>, // API keys, tokens, etc.
+    pub mount_point: Option<PathBuf>, // Where the drive is "mounted" in the virtual FS
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DriveEvent {
+    Connected(DriveProvider),
+    Disconnected(DriveProvider),
+    FileListed { path: PathBuf, entries: Vec<String> },
+    FileDownloaded { path: PathBuf, local_path: PathBuf },
+    FileUploaded { local_path: PathBuf, remote_path: PathBuf },
+    Error(String),
+}
+
 pub struct DriveManager {
-    // Potentially holds a list of known drives or configurations
+    config: DriveConfig,
+    event_sender: mpsc::Sender<DriveEvent>,
+    // Add internal state for connection status, cached file lists, etc.
 }
 
 impl DriveManager {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(config: DriveConfig, event_sender: mpsc::Sender<DriveEvent>) -> Self {
+        Self {
+            config,
+            event_sender,
+        }
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Drive manager initialized for provider: {:?}", self.config.provider);
+        // Attempt to connect or verify credentials
+        match self.config.provider {
+            DriveProvider::GoogleDrive => {
+                log::info!("Attempting to connect to Google Drive...");
+                // Simulate connection
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                self.event_sender.send(DriveEvent::Connected(DriveProvider::GoogleDrive)).await?;
+            },
+            DriveProvider::OneDrive => {
+                log::info!("Attempting to connect to OneDrive...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                self.event_sender.send(DriveEvent::Connected(DriveProvider::OneDrive)).await?;
+            },
+            DriveProvider::Dropbox => {
+                log::info!("Attempting to connect to Dropbox...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                self.event_sender.send(DriveEvent::Connected(DriveProvider::Dropbox)).await?;
+            },
+            DriveProvider::LocalDisk => {
+                log::info!("Managing local disk space.");
+                self.event_sender.send(DriveEvent::Connected(DriveProvider::LocalDisk)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn list_files(&self, remote_path: PathBuf) -> Result<()> {
+        log::info!("Listing files on {:?} at path: {:?}", self.config.provider, remote_path);
+        self.event_sender.send(DriveEvent::FileListed {
+            path: remote_path.clone(),
+            entries: vec![
+                format!("file1.txt (simulated from {:?})", self.config.provider),
+                format!("folder_a/ (simulated from {:?})", self.config.provider),
+            ],
+        }).await?;
+        Ok(())
+    }
+
+    pub async fn download_file(&self, remote_path: PathBuf, local_path: PathBuf) -> Result<()> {
+        log::info!("Downloading file from {:?} ({:?}) to {:?}", self.config.provider, remote_path, local_path);
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await; // Simulate download
+        tokio::fs::write(&local_path, format!("Simulated content from {:?}", remote_path)).await?;
+        self.event_sender.send(DriveEvent::FileDownloaded { remote_path, local_path }).await?;
+        Ok(())
+    }
+
+    pub async fn upload_file(&self, local_path: PathBuf, remote_path: PathBuf) -> Result<()> {
+        log::info!("Uploading file from {:?} to {:?} ({:?})", local_path, self.config.provider, remote_path);
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await; // Simulate upload
+        self.event_sender.send(DriveEvent::FileUploaded { local_path, remote_path }).await?;
+        Ok(())
+    }
+
+    pub async fn disconnect(&self) -> Result<()> {
+        log::info!("Disconnecting from drive provider: {:?}", self.config.provider);
+        self.event_sender.send(DriveEvent::Disconnected(self.config.provider.clone())).await?;
+        Ok(())
     }
 
     /// Lists all available drives or mounted file systems.

@@ -2,54 +2,54 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use anyhow::Result;
+use tokio::time::{self, Duration};
+use log::{info, error};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncEvent {
-    DataChanged(String, String), // (key, value)
-    SyncStarted,
-    SyncCompleted,
-    SyncFailed(String),
-    ConnectionStatus(bool), // true for connected, false for disconnected
+    Start,
+    Progress(String),
+    Complete,
+    Error(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncTarget {
     VercelBlob,
-    Supabase,
-    Custom(String), // e.g., a custom API endpoint
+    GitHubGist,
+    Custom(String), // For custom endpoints
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
+    pub enabled: bool,
+    pub interval_minutes: u64,
     pub target: SyncTarget,
-    pub api_key: String,
-    pub endpoint: Option<String>, // For custom targets
-    pub sync_interval_seconds: u64,
+    pub credentials: HashMap<String, String>, // e.g., API keys, tokens
 }
 
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
+            interval_minutes: 60,
             target: SyncTarget::VercelBlob,
-            api_key: "YOUR_API_KEY".to_string(),
-            endpoint: None,
-            sync_interval_seconds: 300, // Sync every 5 minutes
+            credentials: HashMap::new(),
         }
     }
 }
 
 pub struct SyncManager {
     config: SyncConfig,
-    // In a real implementation, this would hold client instances for Vercel Blob, Supabase, etc.
-    // For now, it's a placeholder.
-    event_sender: mpsc::UnboundedSender<SyncEvent>,
-    // Internal state for tracking changes, last sync time, etc.
+    event_sender: mpsc::Sender<SyncEvent>,
+    // Add internal state for tracking sync status, last sync time, etc.
     last_sync_time: Option<DateTime<Utc>>,
     data_to_sync: HashMap<String, String>, // Simplified: key-value store of data needing sync
 }
 
 impl SyncManager {
-    pub fn new(config: SyncConfig, event_sender: mpsc::UnboundedSender<SyncEvent>) -> Self {
+    pub fn new(config: SyncConfig, event_sender: mpsc::Sender<SyncEvent>) -> Self {
         Self {
             config,
             event_sender,
@@ -58,53 +58,77 @@ impl SyncManager {
         }
     }
 
-    pub async fn start_sync_loop(&mut self) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(self.config.sync_interval_seconds));
-        interval.tick().await; // Initial tick to avoid immediate first run
-
-        loop {
-            interval.tick().await;
-            println!("SyncManager: Attempting to sync data...");
-            let _ = self.event_sender.send(SyncEvent::SyncStarted);
-            match self.perform_sync().await {
-                Ok(_) => {
-                    self.last_sync_time = Some(Utc::now());
-                    let _ = self.event_sender.send(SyncEvent::SyncCompleted);
-                    println!("SyncManager: Sync completed successfully.");
-                }
-                Err(e) => {
-                    let _ = self.event_sender.send(SyncEvent::SyncFailed(e.to_string()));
-                    println!("SyncManager: Sync failed: {}", e);
-                }
-            }
+    pub async fn init(&self) -> Result<()> {
+        info!("Cloud sync manager initialized with config: {:?}", self.config);
+        if self.config.enabled {
+            self.start_periodic_sync().await;
         }
+        Ok(())
     }
 
-    async fn perform_sync(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // This is a placeholder for actual sync logic
-        // In a real scenario, this would interact with Vercel Blob API, Supabase client, etc.
-        println!("SyncManager: Simulating data upload to {:?}", self.config.target);
-        if self.data_to_sync.is_empty() {
-            println!("SyncManager: No data to sync.");
-            return Ok(());
+    pub async fn start_periodic_sync(&self) {
+        let config = self.config.clone();
+        let sender = self.event_sender.clone();
+        tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(config.interval_minutes * 60));
+            interval.tick().await; // Consume the first tick immediately
+
+            loop {
+                interval.tick().await;
+                info!("Initiating periodic cloud sync...");
+                if let Err(e) = Self::perform_sync(&config, &sender).await {
+                    error!("Periodic sync failed: {:?}", e);
+                    let _ = sender.send(SyncEvent::Error(format!("Periodic sync failed: {}", e))).await;
+                }
+            }
+        });
+    }
+
+    pub async fn trigger_manual_sync(&self, force: bool) -> Result<()> {
+        info!("Triggering manual cloud sync (force: {})...", force);
+        self.event_sender.send(SyncEvent::Start).await?;
+        Self::perform_sync(&self.config, &self.event_sender).await?;
+        self.event_sender.send(SyncEvent::Complete).await?;
+        Ok(())
+    }
+
+    async fn perform_sync(config: &SyncConfig, sender: &mpsc::Sender<SyncEvent>) -> Result<()> {
+        sender.send(SyncEvent::Progress("Starting sync...".to_string())).await?;
+
+        match config.target {
+            SyncTarget::VercelBlob => {
+                sender.send(SyncEvent::Progress("Syncing to Vercel Blob...".to_string())).await?;
+                // Simulate API call to Vercel Blob
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                // In a real implementation, you'd use reqwest to interact with Vercel Blob API
+                // let client = reqwest::Client::new();
+                // let response = client.post("https://api.vercel.com/v0/blob/put").json(&data).send().await?;
+                // if !response.status().is_success() {
+                //     return Err(anyhow::anyhow!("Vercel Blob sync failed: {:?}", response.status()));
+                // }
+                sender.send(SyncEvent::Progress("Vercel Blob sync complete.".to_string())).await?;
+            },
+            SyncTarget::GitHubGist => {
+                sender.send(SyncEvent::Progress("Syncing to GitHub Gist...".to_string())).await?;
+                // Simulate API call to GitHub Gist
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                sender.send(SyncEvent::Progress("GitHub Gist sync complete.".to_string())).await?;
+            },
+            SyncTarget::Custom(ref url) => {
+                sender.send(SyncEvent::Progress(format!("Syncing to custom endpoint: {}...", url))).await?;
+                // Simulate API call to custom endpoint
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                sender.send(SyncEvent::Progress("Custom endpoint sync complete.".to_string())).await?;
+            },
         }
 
-        // Simulate API call
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        // Simulate success or failure
-        if self.config.api_key == "FAIL_SYNC" {
-            Err("Simulated API error during sync.".into())
-        } else {
-            println!("SyncManager: Successfully synced {} items.", self.data_to_sync.len());
-            // In a real app, clear data_to_sync after successful upload
-            Ok(())
-        }
+        sender.send(SyncEvent::Progress("Sync successful!".to_string())).await?;
+        Ok(())
     }
 
     pub fn mark_data_for_sync(&mut self, key: String, value: String) {
         self.data_to_sync.insert(key.clone(), value.clone());
-        let _ = self.event_sender.send(SyncEvent::DataChanged(key, value));
+        let _ = self.event_sender.send(SyncEvent::Progress(format!("Data changed: {} -> {}", key, value)));
     }
 
     pub fn get_last_sync_time(&self) -> Option<DateTime<Utc>> {

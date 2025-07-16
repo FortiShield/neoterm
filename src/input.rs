@@ -2,6 +2,9 @@ use iced::{Element, widget::{text_input, column, row, container, button, text}};
 use iced::keyboard::{self, KeyCode, Modifiers};
 use iced::{keyboard::Event as KeyEvent, Event as IcedEvent};
 use std::collections::{VecDeque, HashMap};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use tokio::sync::mpsc;
+use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct EnhancedTextInput {
@@ -78,6 +81,10 @@ pub enum Message {
     CommandPaletteToggle,
     AISidebarToggle,
     RunBenchmark,
+    KeyInput(KeyEvent),
+    Resize(u16, u16),
+    MouseInput(event::MouseEvent),
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,8 +140,8 @@ impl InputHandler {
     pub fn process_iced_event(&self, event: &IcedEvent) -> Option<Message> {
         match event {
             IcedEvent::Keyboard(key_event) => self.process_keyboard_event(key_event),
-            IcedEvent::Mouse(mouse_event) => Some(Message::Mouse(mouse_event.clone())),
-            IcedEvent::Text(text) => Some(Message::Text(text.clone())),
+            IcedEvent::Mouse(mouse_event) => Some(Message::MouseInput(mouse_event.clone())),
+            IcedEvent::Text(text) => Some(Message::InputChanged(text.clone())),
             _ => None,
         }
     }
@@ -233,6 +240,18 @@ impl EnhancedTextInput {
             }
             Message::RunBenchmark => {
                 // Handle run benchmark
+            }
+            Message::KeyInput(key_event) => {
+                // Handle key input event
+            }
+            Message::Resize(width, height) => {
+                // Handle resize event
+            }
+            Message::MouseInput(mouse_event) => {
+                // Handle mouse input event
+            }
+            Message::Error(error_message) => {
+                // Handle error event
             }
         }
     }
@@ -506,4 +525,100 @@ impl EnhancedTextInput {
 
 pub fn init() {
     println!("input module loaded");
+}
+
+/// Represents an input message from the terminal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputEvent {
+    /// A keyboard key was pressed.
+    Key(KeyEvent),
+    /// The terminal was resized.
+    Resize(u16, u16),
+    /// A mouse event occurred.
+    Mouse(event::MouseEvent),
+    /// No event occurred within the timeout.
+    Tick,
+    /// An error occurred while reading input.
+    Error(String),
+}
+
+/// Manages reading input events from the terminal.
+pub struct InputManager {
+    event_sender: mpsc::Sender<InputEvent>,
+    event_receiver: mpsc::Receiver<InputEvent>,
+}
+
+impl InputManager {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(100); // Buffer for input events
+        Self {
+            event_sender: tx,
+            event_receiver: rx,
+        }
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Input manager initialized.");
+        crossterm::terminal::enable_raw_mode()?;
+        crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)?;
+        Ok(())
+    }
+
+    /// Starts a background task to continuously read input events.
+    pub fn start_event_loop(&self) {
+        let sender = self.event_sender.clone();
+        tokio::spawn(async move {
+            loop {
+                // Poll for events with a timeout to allow other async tasks to run
+                if event::poll(std::time::Duration::from_millis(50)).unwrap() {
+                    match event::read() {
+                        Ok(Event::Key(key_event)) => {
+                            if sender.send(InputEvent::Key(key_event)).await.is_err() {
+                                log::warn!("Input event receiver dropped, stopping event loop.");
+                                break;
+                            }
+                        },
+                        Ok(Event::Resize(w, h)) => {
+                            if sender.send(InputEvent::Resize(w, h)).await.is_err() {
+                                log::warn!("Input event receiver dropped, stopping event loop.");
+                                break;
+                            }
+                        },
+                        Ok(Event::Mouse(mouse_event)) => {
+                            if sender.send(InputEvent::Mouse(mouse_event)).await.is_err() {
+                                log::warn!("Input event receiver dropped, stopping event loop.");
+                                break;
+                            }
+                        },
+                        Ok(_) => { /* Ignore other event types for now */ },
+                        Err(e) => {
+                            log::error!("Error reading crossterm event: {:?}", e);
+                            if sender.send(InputEvent::Error(e.to_string())).await.is_err() {
+                                log::warn!("Input event receiver dropped, stopping event loop.");
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Send a tick event if no input was received
+                    if sender.send(InputEvent::Tick).await.is_err() {
+                        log::warn!("Input event receiver dropped, stopping event loop.");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Receives the next input event.
+    pub async fn next_event(&mut self) -> Option<InputEvent> {
+        self.event_receiver.recv().await
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        log::info!("Shutting down input manager.");
+        crossterm::execute!(std::io::stdout(), event::DisableMouseCapture)?;
+        crossterm::terminal::disable_raw_mode()?;
+        Ok(())
+    }
 }

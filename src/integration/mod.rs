@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use anyhow::Result;
+use git2;
+use log;
 
 /// Represents a generic integration event that can be sent from an integration module
 /// to the main application loop.
@@ -96,6 +99,47 @@ impl IntegrationManager {
             Err(format!("Integration '{}' not found.", integration_name))
         }
     }
+
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Integration manager initialized.");
+        // Initialize specific integrations here
+        Ok(())
+    }
+
+    /// Example: Connect to a Git repository
+    pub async fn connect_git_repo(&self, path: &str) -> Result<String> {
+        log::info!("Attempting to connect to Git repository at: {}", path);
+        // Simulate git2 operations
+        let repo = git2::Repository::open(path)?;
+        let head = repo.head()?;
+        let branch_name = head.shorthand().unwrap_or("detached HEAD").to_string();
+        Ok(format!("Successfully connected to Git repo at {}. Current branch: {}", path, branch_name))
+    }
+
+    /// Example: Fetch Docker images
+    pub async fn fetch_docker_images(&self) -> Result<Vec<String>> {
+        log::info!("Fetching Docker images (simulated)...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        Ok(vec![
+            "ubuntu:latest".to_string(),
+            "nginx:stable".to_string(),
+            "my-app:1.0".to_string(),
+        ])
+    }
+
+    /// Example: Interact with a Kubernetes cluster
+    pub async fn get_kubernetes_pods(&self, namespace: &str) -> Result<Vec<String>> {
+        log::info!("Getting Kubernetes pods in namespace: {} (simulated)...", namespace);
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        Ok(vec![
+            format!("pod-a-in-{}", namespace),
+            format!("pod-b-in-{}", namespace),
+        ])
+    }
+}
+
+pub fn init() {
+    log::info!("Integration module initialized.");
 }
 
 // --- Example Ollama Integration (Conceptual) ---
@@ -167,8 +211,4 @@ impl Integration for OllamaIntegration {
             }
         });
     }
-}
-
-pub fn init() {
-    println!("integration module loaded");
 }

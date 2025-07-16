@@ -1,140 +1,67 @@
-// fuzzy_match module stub
+use anyhow::Result;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
+use serde::{Deserialize, Serialize};
 
-/// A simple fuzzy matching utility.
-/// This module provides functions to perform fuzzy string matching,
-/// useful for search, command palette, and autocomplete features.
-pub struct FuzzyMatcher {
-    // Configuration for fuzzy matching algorithm (e.g., scoring parameters)
-    case_sensitive: bool,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuzzyMatchResult {
+    pub text: String,
+    pub score: i64,
+    pub indices: Vec<usize>,
 }
 
-impl FuzzyMatcher {
-    /// Creates a new `FuzzyMatcher` instance.
-    pub fn new(case_sensitive: bool) -> Self {
-        Self { case_sensitive }
-    }
-
-    /// Performs a fuzzy match between a `pattern` and a `text`.
-    /// Returns a score (higher is better) and optionally the matched indices.
-    /// A score of 0 means no match.
-    pub fn match_string(&self, pattern: &str, text: &str) -> (f64, Option<Vec<usize>>) {
-        let (pattern_chars, text_chars) = if self.case_sensitive {
-            (pattern.chars().collect::<Vec<_>>(), text.chars().collect::<Vec<_>>())
-        } else {
-            (pattern.to_lowercase().chars().collect::<Vec<_>>(), text.to_lowercase().chars().collect::<Vec<_>>())
-        };
-
-        if pattern_chars.is_empty() {
-            return (1.0, Some((0..text_chars.len()).collect())); // Empty pattern matches everything
-        }
-        if text_chars.is_empty() {
-            return (0.0, None); // Cannot match non-empty pattern in empty text
-        }
-
-        let mut score = 0.0;
-        let mut matched_indices = Vec::new();
-        let mut text_idx = 0;
-
-        for p_char in pattern_chars {
-            let mut found = false;
-            while text_idx < text_chars.len() {
-                if text_chars[text_idx] == p_char {
-                    score += 1.0; // Basic score for a match
-                    matched_indices.push(text_idx);
-                    found = true;
-                    text_idx += 1;
-                    break;
-                }
-                text_idx += 1;
-            }
-            if !found {
-                return (0.0, None); // Pattern character not found
-            }
-        }
-
-        // Add bonus for consecutive matches, start of word matches, etc.
-        // This is a very basic scoring. Real fuzzy matchers use more complex algorithms (e.g., Levenshtein distance, trigrams).
-        let mut consecutive_bonus = 0.0;
-        for i in 1..matched_indices.len() {
-            if matched_indices[i] == matched_indices[i-1] + 1 {
-                consecutive_bonus += 0.1;
-            }
-        }
-        score += consecutive_bonus;
-
-        // Normalize score (e.g., by pattern length or text length)
-        score /= pattern.len() as f64;
-
-        (score, Some(matched_indices))
-    }
-
-    /// Finds the best fuzzy match for a `pattern` within a list of `candidates`.
-    /// Returns the best matching candidate and its score, if any.
-    pub fn find_best_match<'a>(&self, pattern: &str, candidates: &'a [String]) -> Option<(&'a String, f64)> {
-        let mut best_score = 0.0;
-        let mut best_match = None;
-
-        for candidate in candidates {
-            let (score, _) = self.match_string(pattern, candidate);
-            if score > best_score {
-                best_score = score;
-                best_match = Some(candidate);
-            }
-        }
-        best_match.map(|m| (m, best_score))
-    }
+pub struct FuzzyMatchManager {
+    matcher: SkimMatcherV2,
 }
 
-pub fn init() {
-    println!("fuzzy_match module initialized: Provides fuzzy string matching.");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fuzzy_match_basic() {
-        let matcher = FuzzyMatcher::new(false);
-        let (score, indices) = matcher.match_string("abc", "axbyc");
-        assert!(score > 0.0);
-        assert_eq!(indices, Some(vec![0, 2, 4]));
-
-        let (score, _) = matcher.match_string("abc", "xyz");
-        assert_eq!(score, 0.0);
-
-        let (score, _) = matcher.match_string("term", "neoterminal");
-        assert!(score > 0.0);
+impl FuzzyMatchManager {
+    pub fn new() -> Self {
+        Self {
+            matcher: SkimMatcherV2::default().ignore_case(),
+        }
     }
 
-    #[test]
-    fn test_fuzzy_match_case_sensitive() {
-        let matcher = FuzzyMatcher::new(true);
-        let (score, _) = matcher.match_string("abc", "AxByC");
-        assert_eq!(score, 0.0);
-
-        let (score, _) = matcher.match_string("abc", "abc");
-        assert!(score > 0.0);
+    pub fn init(&self) {
+        log::info!("Fuzzy match manager initialized.");
     }
 
-    #[test]
-    fn test_find_best_match() {
-        let matcher = FuzzyMatcher::new(false);
-        let candidates = vec![
-            "apple".to_string(),
-            "banana".to_string(),
-            "apricot".to_string(),
-            "grape".to_string(),
-        ];
+    /// Performs a fuzzy match against a list of candidates.
+    pub fn fuzzy_match(&self, query: &str, candidates: &[String]) -> Vec<FuzzyMatchResult> {
+        let mut results: Vec<FuzzyMatchResult> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                self.matcher.fuzzy_match_with_matches(candidate, query)
+                    .map(|(score, indices)| FuzzyMatchResult {
+                        text: candidate.clone(),
+                        score,
+                        indices,
+                    })
+            })
+            .collect();
 
-        let (best_match, score) = matcher.find_best_match("ap", &candidates).unwrap();
-        assert_eq!(best_match, &"apple".to_string());
-        assert!(score > 0.0);
+        // Sort by score in descending order
+        results.sort_by(|a, b| b.score.cmp(&a.score));
+        results
+    }
 
-        let (best_match, score) = matcher.find_best_match("ana", &candidates).unwrap();
-        assert_eq!(best_match, &"banana".to_string());
-        assert!(score > 0.0);
+    /// Highlights the matched characters in a string.
+    pub fn highlight_match(text: &str, indices: &[usize], highlight_char: char) -> String {
+        let mut highlighted_text = String::new();
+        let mut last_index = 0;
 
-        assert!(matcher.find_best_match("xyz", &candidates).is_none());
+        for &idx in indices {
+            if idx >= text.len() { continue; } // Should not happen with correct indices
+
+            // Append text before the match
+            highlighted_text.push_str(&text[last_index..idx]);
+            // Append the matched character with highlight
+            highlighted_text.push(highlight_char);
+            highlighted_text.push(text.chars().nth(idx).unwrap()); // Get char at index
+            highlighted_text.push(highlight_char);
+            last_index = idx + text.chars().nth(idx).unwrap().len_utf8(); // Move past the char
+        }
+        // Append any remaining text
+        highlighted_text.push_str(&text[last_index..]);
+        highlighted_text
     }
 }

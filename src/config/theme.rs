@@ -1,112 +1,66 @@
 use serde::{Deserialize, Serialize};
-use iced::{Color, Font};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThemeConfig {
-    pub name: String,
-    pub colors: HashMap<String, String>, // Hex codes or named colors
-    pub syntax_highlighting: HashMap<String, String>, // For code blocks
-    pub terminal_colors: TerminalColors,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalColors {
-    pub background: String,
-    pub foreground: String,
-    pub cursor: String,
-    pub selection: String,
-    pub black: String,
-    pub red: String,
-    pub green: String,
-    pub yellow: String,
-    pub blue: String,
-    pub magenta: String,
-    pub cyan: String,
-    pub white: String,
-    pub bright_black: String,
-    pub bright_red: String,
-    pub bright_green: String,
-    pub bright_yellow: String,
-    pub bright_blue: String,
-    pub bright_magenta: String,
-    pub bright_cyan: String,
-    pub bright_white: String,
-}
-
-impl Default for ThemeConfig {
-    fn default() -> Self {
-        // A simple default light theme
-        let mut colors = HashMap::new();
-        colors.insert("primary".to_string(), "#007bff".to_string());
-        colors.insert("secondary".to_string(), "#6c757d".to_string());
-        colors.insert("success".to_string(), "#28a745".to_string());
-        colors.insert("danger".to_string(), "#dc3545".to_string());
-        colors.insert("warning".to_string(), "#ffc107".to_string());
-        colors.insert("info".to_string(), "#17a2b8".to_string());
-
-        let mut syntax_highlighting = HashMap::new();
-        syntax_highlighting.insert("keyword".to_string(), "#0000ff".to_string());
-        syntax_highlighting.insert("string".to_string(), "#a31515".to_string());
-        syntax_highlighting.insert("comment".to_string(), "#008000".to_string());
-        syntax_highlighting.insert("number".to_string(), "#098677".to_string());
-
-        Self {
-            name: "Default Light".to_string(),
-            colors,
-            syntax_highlighting,
-            terminal_colors: TerminalColors {
-                background: "#FFFFFF".to_string(),
-                foreground: "#000000".to_string(),
-                cursor: "#000000".to_string(),
-                selection: "#B4D5FF".to_string(),
-                black: "#000000".to_string(),
-                red: "#CD3131".to_string(),
-                green: "#0BCB0B".to_string(),
-                yellow: "#E5E510".to_string(),
-                blue: "#2472C8".to_string(),
-                magenta: "#BC3FBC".to_string(),
-                cyan: "#0ADBBF".to_string(),
-                white: "#E5E5E5".to_string(),
-                bright_black: "#666666".to_string(),
-                bright_red: "#F14C4C".to_string(),
-                bright_green: "#17A717".to_string(),
-                bright_yellow: "#F5F543".to_string(),
-                bright_blue: "#3B8EEA".to_string(),
-                bright_magenta: "#D670D6".to_string(),
-                bright_cyan: "#1ADCEF".to_string(),
-                bright_white: "#FFFFFF".to_string(),
-            },
-        }
-    }
-}
-
-pub fn init() {
-    println!("config/theme module loaded");
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
-    pub background: Color,
-    pub foreground: Color,
-    pub primary: Color,
-    pub secondary: Color,
-    pub danger: Color,
-    pub text: Color,
-    pub border: Color,
-    // Add more theme colors/styles as needed
+    pub name: String,
+    pub description: String,
+    pub colors: HashMap<String, String>, // e.g., "background": "#1e1e1e", "foreground": "#d4d4d4"
+    pub syntax_highlighting: HashMap<String, String>, // e.g., "keyword": "#569cd6"
+    pub ui_elements: HashMap<String, String>, // e.g., "border": "#444444", "selection": "#264f78"
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            background: Color::from_rgb8(240, 240, 240),
-            foreground: Color::BLACK,
-            primary: Color::from_rgb8(0, 120, 215),
-            secondary: Color::from_rgb8(100, 100, 100),
-            danger: Color::from_rgb8(200, 0, 0),
-            text: Color::BLACK,
-            border: Color::from_rgb8(200, 200, 200),
+            name: "default".to_string(),
+            description: "A default dark theme.".to_string(),
+            colors: [
+                ("background".to_string(), "#1e1e1e".to_string()),
+                ("foreground".to_string(), "#d4d4d4".to_string()),
+                ("cursor".to_string(), "#ffffff".to_string()),
+                ("black".to_string(), "#000000".to_string()),
+                ("red".to_string(), "#cd3131".to_string()),
+                ("green".to_string(), "#0dbc79".to_string()),
+                ("yellow".to_string(), "#e5e510".to_string()),
+                ("blue".to_string(), "#2472c8".to_string()),
+                ("magenta".to_string(), "#bc3fbc".to_string()),
+                ("cyan".to_string(), "#03babc".to_string()),
+                ("white".to_string(), "#e0e0e0".to_string()),
+                ("bright_black".to_string(), "#666666".to_string()),
+                ("bright_red".to_string(), "#f14c4c".to_string()),
+                ("bright_green".to_string(), "#23d18b".to_string()),
+                ("bright_yellow".to_string(), "#f5f543".to_string()),
+                ("bright_blue".to_string(), "#3b8eea".to_string()),
+                ("bright_magenta".to_string(), "#d670d6".to_string()),
+                ("bright_cyan".to_string(), "#29b8bd".to_string()),
+                ("bright_white".to_string(), "#e6e6e6".to_string()),
+            ].iter().cloned().collect(),
+            syntax_highlighting: [
+                ("keyword".to_string(), "#569cd6".to_string()),
+                ("string".to_string(), "#ce9178".to_string()),
+                ("comment".to_string(), "#6a9955".to_string()),
+                ("number".to_string(), "#b5cea8".to_string()),
+                ("function".to_string(), "#dcdcaa".to_string()),
+                ("variable".to_string(), "#9cdcfe".to_string()),
+            ].iter().cloned().collect(),
+            ui_elements: [
+                ("border".to_string(), "#444444".to_string()),
+                ("selection".to_string(), "#264f78".to_string()),
+                ("tab_active".to_string(), "#333333".to_string()),
+                ("tab_inactive".to_string(), "#252526".to_string()),
+                ("status_bar".to_string(), "#007acc".to_string()),
+                ("command_palette_bg".to_string(), "#252526".to_string()),
+                ("command_palette_fg".to_string(), "#d4d4d4".to_string()),
+            ].iter().cloned().collect(),
         }
+    }
+}
+
+impl Theme {
+    pub fn get_color(&self, name: &str) -> Option<&String> {
+        self.colors.get(name)
+            .or_else(|| self.syntax_highlighting.get(name))
+            .or_else(|| self.ui_elements.get(name))
     }
 }

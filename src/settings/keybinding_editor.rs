@@ -1,8 +1,22 @@
 use iced::{widget::{column, row, text, button, text_input, scrollable}, Element, Command, Length};
 use iced::keyboard::{KeyCode, Modifiers};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use tokio::fs;
+use crate::config::CONFIG_DIR;
 use crate::input::Keybinding; // Assuming Keybinding is defined here
 use crate::settings::Settings; // Assuming Settings struct is defined
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Keybinding {
+    pub id: String,
+    pub keys: Vec<String>, // e.g., ["ctrl", "shift", "s"]
+    pub command: String,   // Command ID to execute
+    pub description: String,
+    pub when: Option<String>, // Contextual condition (e.g., "editor_focused")
+}
 
 #[derive(Debug, Clone)]
 pub enum KeybindingEditorMessage {
@@ -18,6 +32,7 @@ pub enum KeybindingEditorMessage {
 
 #[derive(Debug, Clone)]
 pub struct KeybindingEditor {
+    keybindings_file: PathBuf,
     settings: Settings,
     // Map from action name to its current keybinding
     action_keybindings: HashMap<String, Option<Keybinding>>,
@@ -30,24 +45,100 @@ pub struct KeybindingEditor {
 
 impl KeybindingEditor {
     pub fn new(settings: Settings) -> Self {
-        let mut action_keybindings = HashMap::new();
-        // Populate with default/current keybindings from settings or a predefined list
-        // For demonstration, let's assume some actions
-        action_keybindings.insert("Toggle Command Palette".to_string(), Some(Keybinding::Single(KeyCode::P, Modifiers::COMMAND)));
-        action_keybindings.insert("Toggle AI Sidebar".to_string(), Some(Keybinding::Single(KeyCode::A, Modifiers::COMMAND)));
-        action_keybindings.insert("Run Benchmarks".to_string(), Some(Keybinding::Single(KeyCode::F1, Modifiers::NONE)));
-        action_keybindings.insert("Save File".to_string(), Some(Keybinding::Single(KeyCode::S, Modifiers::COMMAND)));
-        action_keybindings.insert("Open File".to_string(), Some(Keybinding::Single(KeyCode::O, Modifiers::COMMAND)));
-
-
-        KeybindingEditor {
+        let keybindings_file = CONFIG_DIR.join("keybindings.yaml");
+        Self {
+            keybindings_file,
             settings,
-            action_keybindings,
+            action_keybindings: HashMap::new(),
             selected_action: None,
             new_key_input: String::new(),
             capturing_key: false,
             captured_key: None,
         }
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Keybinding editor initialized. Keybindings file: {:?}", self.keybindings_file);
+        if !self.keybindings_file.exists() {
+            self.save_default_keybindings().await?;
+        }
+        Ok(())
+    }
+
+    async fn save_default_keybindings(&self) -> Result<()> {
+        let default_keybindings = vec![
+            Keybinding {
+                id: "quit_app".to_string(),
+                keys: vec!["ctrl".to_string(), "c".to_string()],
+                command: "app.quit".to_string(),
+                description: "Quit the application".to_string(),
+                when: None,
+            },
+            Keybinding {
+                id: "next_block".to_string(),
+                keys: vec!["tab".to_string()],
+                command: "ui.next_block".to_string(),
+                description: "Switch to next UI block".to_string(),
+                when: None,
+            },
+            Keybinding {
+                id: "run_benchmarks".to_string(),
+                keys: vec!["f1".to_string()],
+                command: "app.run_benchmarks".to_string(),
+                description: "Run performance benchmarks".to_string(),
+                when: None,
+            },
+        ];
+        let contents = serde_yaml::to_string(&default_keybindings)?;
+        fs::write(&self.keybindings_file, contents).await?;
+        log::info!("Default keybindings saved to {:?}", self.keybindings_file);
+        Ok(())
+    }
+
+    pub async fn load_keybindings(&self) -> Result<Vec<Keybinding>> {
+        let contents = fs::read_to_string(&self.keybindings_file).await?;
+        let keybindings: Vec<Keybinding> = serde_yaml::from_str(&contents)?;
+        log::info!("Loaded {} keybindings from {:?}", keybindings.len(), self.keybindings_file);
+        Ok(keybindings)
+    }
+
+    pub async fn save_keybindings(&self, keybindings: &[Keybinding]) -> Result<()> {
+        let contents = serde_yaml::to_string_pretty(keybindings)?;
+        fs::write(&self.keybindings_file, contents).await?;
+        log::info!("Saved {} keybindings to {:?}", keybindings.len(), self.keybindings_file);
+        Ok(())
+    }
+
+    /// Example: Get command for a given key event.
+    pub async fn get_command_for_key_event(&self, key_event: &crossterm::event::KeyEvent) -> Option<String> {
+        let loaded_keybindings = self.load_keybindings().await.ok()?;
+        for binding in loaded_keybindings {
+            let mut matches = true;
+            if binding.keys.len() != 1 + key_event.modifiers.bits().count_ones() as usize {
+                matches = false;
+            } else {
+                for key_part in &binding.keys {
+                    match key_part.as_str() {
+                        "ctrl" => if !key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) { matches = false; break; },
+                        "alt" => if !key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT) { matches = false; break; },
+                        "shift" => if !key_event.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) { matches = false; break; break; },
+                        _ => {
+                            if let crossterm::event::KeyCode::Char(c) = key_event.code {
+                                if key_part != &c.to_string() { matches = false; break; }
+                            } else {
+                                // Handle other KeyCode variants if needed
+                                matches = false; break;
+                            }
+                        }
+                    }
+                }
+            }
+            if matches {
+                log::debug!("Matched keybinding: {} -> {}", binding.keys.join("+"), binding.command);
+                return Some(binding.command);
+            }
+        }
+        None
     }
 
     pub fn update(&mut self, message: KeybindingEditorMessage) -> Command<KeybindingEditorMessage> {

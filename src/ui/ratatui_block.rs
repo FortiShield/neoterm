@@ -186,3 +186,43 @@ impl CollapsibleBlockRenderer {
         }
     }
 }
+
+/// A simple wrapper for a ratatui Block, used for rendering generic content.
+pub struct RatatuiBlock {
+    pub title: String,
+    pub content: Vec<Line<'static>>,
+    pub is_active: bool,
+}
+
+impl RatatuiBlock {
+    pub fn new(title: String, content: Vec<Line<'static>>) -> Self {
+        Self {
+            title,
+            content,
+            is_active: false,
+        }
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.is_active = active;
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let border_style = if self.is_active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(self.title.clone(), Style::default().fg(Color::LightGreen)));
+
+        let paragraph = Paragraph::new(self.content.clone())
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false });
+
+        frame.render_widget(paragraph, area);
+    }
+}

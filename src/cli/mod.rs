@@ -3,13 +3,14 @@
 //! allowing for headless operations or scripting.
 
 use clap::{Parser, Subcommand};
+use log;
 
-/// NeoTerm: A next-generation terminal with AI assistance and advanced features.
+/// NeoTerm: A modern terminal emulator with AI integration and advanced features.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Turn on verbose output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub verbose: bool,
 
     #[command(subcommand)]
@@ -18,61 +19,112 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Executes a shell command directly without launching the full GUI.
-    #[command(arg_required_else_help = true)]
-    Exec {
-        /// The command to execute.
-        #[arg(required = true, index = 1)]
+    /// Start the NeoTerm GUI
+    Gui {
+        /// Initial directory to open
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Run a command in headless mode
+    Run {
+        /// Command to execute
         command: String,
-        /// Arguments for the command.
+        /// Arguments for the command
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Runs a specific workflow by its name or ID.
-    #[command(arg_required_else_help = true)]
-    Workflow {
-        /// The name or ID of the workflow to run.
-        #[arg(required = true, index = 1)]
-        name_or_id: String,
-        /// Optional arguments to pass to the workflow.
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Manages NeoTerm configurations (e.g., get, set, list).
+    /// Manage NeoTerm configurations
     Config {
         #[command(subcommand)]
         action: ConfigCommands,
     },
-    /// Runs performance benchmarks and prints results to stdout.
+    /// Interact with the AI assistant
+    Ai {
+        #[command(subcommand)]
+        action: AiCommands,
+    },
+    /// Run performance benchmarks
     Benchmark,
-    /// Starts the NeoTerm API server in headless mode.
-    ApiServer {
-        /// The port to listen on.
-        #[arg(short, long, default_value_t = 8080)]
-        port: u16,
+    /// Sync data with cloud services
+    Sync {
+        /// Force a full sync
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Manage plugins
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommands,
+    },
+    /// Manage workflows
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowCommands,
     },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommands {
-    /// Gets the value of a specific configuration key.
-    Get {
-        /// The configuration key to retrieve (e.g., "ui.theme", "ai.provider").
-        key: String,
-    },
-    /// Sets the value of a specific configuration key.
+    /// Show current configuration
+    Show,
+    /// Set a configuration value
     Set {
-        /// The configuration key to set.
         key: String,
-        /// The value to set.
         value: String,
     },
-    /// Lists all configuration keys and their current values.
+    /// Edit configuration file in default editor
+    Edit,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AiCommands {
+    /// Send a message to the AI assistant
+    Chat {
+        message: String,
+    },
+    /// Get the conversation history
+    History,
+    /// Reset the AI conversation
+    Reset,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginCommands {
+    /// List installed plugins
     List,
+    /// Install a plugin from a path or URL
+    Install {
+        source: String,
+    },
+    /// Uninstall a plugin
+    Uninstall {
+        name: String,
+    },
+    /// Update all installed plugins
+    Update,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkflowCommands {
+    /// List available workflows
+    List,
+    /// Run a specific workflow
+    Run {
+        name: String,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Edit a workflow file in default editor
+    Edit {
+        name: String,
+    },
+    /// Import a workflow from a path or URL
+    Import {
+        source: String,
+    },
 }
 
 /// Initializes the CLI module.
 pub fn init() {
-    // This function can be used for any global CLI setup if needed.
-    // For now, it's a placeholder.
+    log::info!("CLI module initialized.");
 }

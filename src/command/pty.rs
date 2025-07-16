@@ -1,180 +1,159 @@
-use tokio::io::{AsyncRead, AsyncWrite};
-use async_trait::async_trait;
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use anyhow::{Result, anyhow};
+use portable_pty::{CommandBuilder, PtySize, PtySystem, MasterPty, Child, ChildKiller};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-// This module would abstract over different PTY (Pseudo-Terminal) implementations
-// for various operating systems (e.g., `pty` crate on Unix, `winpty` or `conpty` on Windows).
+/// Represents output from the PTY.
+#[derive(Debug, Clone)]
+pub struct PtyOutput {
+    pub data: Vec<u8>,
+    pub is_stderr: bool, // PTYs typically don't separate stdout/stderr, but this could be for future parsing
+}
 
-/// A trait for interacting with a Pseudo-Terminal.
-/// This allows for reading from and writing to a terminal session programmatically.
-#[async_trait]
-pub trait Pty: AsyncRead + AsyncWrite + Send + Unpin {
-    /// Spawns a new process within the PTY.
-    async fn spawn_command(&mut self, command: &str, args: &[String], cwd: Option<&str>) -> io::Result<()>;
+/// Manages a pseudo-terminal session.
+pub struct PtySession {
+    master: Box<dyn MasterPty + Send>,
+    _child: Box<dyn Child + Send>, // Keep child handle to prevent it from being dropped
+    _child_killer: Option<Arc<dyn ChildKiller + Send + Sync>>, // For graceful termination
+    output_receiver: mpsc::Receiver<PtyOutput>,
+    input_sender: mpsc::Sender<Vec<u8>>,
+}
+
+impl PtySession {
+    pub async fn spawn(
+        executable: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        env: &HashMap<String, String>,
+    ) -> Result<Self> {
+        let pty_system = portable_pty::PtySystem::default();
+
+        let pair = pty_system.openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let mut cmd = CommandBuilder::new(executable);
+        cmd.args(args);
+        if let Some(dir) = working_dir {
+            cmd.cwd(dir);
+        }
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+
+        let child = pair.slave.spawn_command(cmd)?;
+        let child_killer = child.clone_killer();
+
+        let master = pair.master;
+        let mut reader = master.try_clone_reader()?;
+        let mut writer = master.try_clone_writer()?;
+
+        let (output_tx, output_rx) = mpsc::channel(100);
+        let (input_tx, mut input_rx) = mpsc::channel(100);
+
+        // Read from PTY and send to output_tx
+        tokio::spawn(async move {
+            let mut buf = vec![0; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => {
+                        log::debug!("PTY reader got EOF.");
+                        break;
+                    },
+                    Ok(n) => {
+                        if output_tx.send(PtyOutput {
+                            data: buf[..n].to_vec(),
+                            is_stderr: false, // PTYs don't distinguish stdout/stderr
+                        }).await.is_err() {
+                            log::warn!("PTY output receiver dropped.");
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        log::error!("Error reading from PTY: {:?}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Read from input_rx and write to PTY
+        tokio::spawn(async move {
+            while let Some(input_data) = input_rx.recv().await {
+                if let Err(e) = writer.write_all(&input_data).await {
+                    log::error!("Error writing to PTY: {:?}", e);
+                    break;
+                }
+            }
+        });
+
+        Ok(Self {
+            master,
+            _child: child,
+            _child_killer: child_killer.map(Arc::new),
+            output_receiver: output_rx,
+            input_sender: input_tx,
+        })
+    }
+
+    /// Reads output from the PTY.
+    pub async fn read_output(&mut self) -> Option<PtyOutput> {
+        self.output_receiver.recv().await
+    }
+
+    /// Writes input to the PTY.
+    pub async fn write_input(&self, data: &[u8]) -> Result<()> {
+        self.input_sender.send(data.to_vec()).await
+            .map_err(|e| anyhow!("Failed to send input to PTY: {:?}", e))
+    }
 
     /// Resizes the PTY.
-    fn resize(&self, rows: u16, cols: u16) -> io::Result<()>;
-
-    /// Waits for the spawned process to exit and returns its exit code.
-    async fn wait(&mut self) -> io::Result<Option<i32>>;
-}
-
-// Placeholder for a concrete Pty implementation (e.g., for Unix-like systems)
-#[cfg(unix)]
-pub struct UnixPty {
-    // This would typically hold a `pty::Pty` instance or similar
-    // For now, it's a dummy.
-    _dummy: (),
-}
-
-#[cfg(unix)]
-impl UnixPty {
-    pub fn new(rows: u16, cols: u16) -> io::Result<Self> {
-        println!("UnixPty: Creating new PTY with {} rows, {} cols", rows, cols);
-        // In a real implementation, this would create a PTY master/slave pair
-        // and set up non-blocking I/O.
-        Ok(Self { _dummy: () })
-    }
-}
-
-#[cfg(unix)]
-#[async_trait]
-impl Pty for UnixPty {
-    async fn spawn_command(&mut self, command: &str, args: &[String], cwd: Option<&str>) -> io::Result<()> {
-        println!("UnixPty: Spawning command: {} with args {:?} in {:?}", command, args, cwd);
-        // In a real implementation, this would fork and exec the command in the PTY slave.
+    pub async fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
         Ok(())
     }
 
-    fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
-        println!("UnixPty: Resizing PTY to {} rows, {} cols", rows, cols);
-        // In a real implementation, this would send a TIOCSWINSZ ioctl.
-        Ok(())
+    /// Waits for the child process to exit.
+    pub async fn wait(&mut self) -> Result<portable_pty::ExitStatus> {
+        // portable-pty's Child::wait is blocking, so we need to spawn it.
+        let child_handle = self._child.take().ok_or_else(|| anyhow!("Child handle already taken"))?;
+        let exit_status = tokio::task::spawn_blocking(move || child_handle.wait())
+            .await??;
+        Ok(exit_status)
     }
 
-    async fn wait(&mut self) -> io::Result<Option<i32>> {
-        println!("UnixPty: Waiting for command to exit...");
-        // Simulate some delay
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        Ok(Some(0)) // Simulate successful exit
-    }
-}
-
-#[cfg(unix)]
-impl AsyncRead for UnixPty {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        // Dummy implementation: always pending or returns 0 bytes
-        Poll::Pending
-    }
-}
-
-#[cfg(unix)]
-impl AsyncWrite for UnixPty {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        // Dummy implementation: always pending or returns 0 bytes
-        Poll::Pending
+    /// Sends a signal to the child process (e.g., SIGINT).
+    pub async fn signal(&self, signal: portable_pty::Signal) -> Result<()> {
+        if let Some(killer) = &self._child_killer {
+            killer.signal(signal)?;
+            Ok(())
+        } else {
+            Err(anyhow!("No child killer available for signaling."))
+        }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-// Placeholder for a concrete Pty implementation for Windows
-#[cfg(windows)]
-pub struct WindowsPty {
-    _dummy: (),
-}
-
-#[cfg(windows)]
-impl WindowsPty {
-    pub fn new(rows: u16, cols: u16) -> io::Result<Self> {
-        println!("WindowsPty: Creating new PTY with {} rows, {} cols", rows, cols);
-        // In a real implementation, this would use winpty or conpty.
-        Ok(Self { _dummy: () })
-    }
-}
-
-#[cfg(windows)]
-#[async_trait]
-impl Pty for WindowsPty {
-    async fn spawn_command(&mut self, command: &str, args: &[String], cwd: Option<&str>) -> io::Result<()> {
-        println!("WindowsPty: Spawning command: {} with args {:?} in {:?}", command, args, cwd);
-        Ok(())
-    }
-
-    fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
-        println!("WindowsPty: Resizing PTY to {} rows, {} cols", rows, cols);
-        Ok(())
-    }
-
-    async fn wait(&mut self) -> io::Result<Option<i32>> {
-        println!("WindowsPty: Waiting for command to exit...");
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        Ok(Some(0))
-    }
-}
-
-#[cfg(windows)]
-impl AsyncRead for WindowsPty {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        Poll::Pending
-    }
-}
-
-#[cfg(windows)]
-impl AsyncWrite for WindowsPty {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Poll::Pending
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-// Generic function to create a Pty instance
-pub fn create_pty(rows: u16, cols: u16) -> io::Result<Box<dyn Pty + Send + Unpin>> {
-    #[cfg(unix)]
-    {
-        Ok(Box::new(UnixPty::new(rows, cols)?))
-    }
-    #[cfg(windows)]
-    {
-        Ok(Box::new(WindowsPty::new(rows, cols)?))
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err(io::Error::new(io::ErrorKind::Other, "PTY not supported on this platform"))
+    /// Kills the child process.
+    pub async fn kill(&self) -> Result<()> {
+        if let Some(killer) = &self._child_killer {
+            killer.kill()?;
+            Ok(())
+        } else {
+            Err(anyhow!("No child killer available for killing."))
+        }
     }
 }
 
 pub fn init() {
-    println!("command/pty module loaded");
+    log::info!("PTY module initialized.");
 }

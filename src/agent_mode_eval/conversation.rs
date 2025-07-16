@@ -1,97 +1,94 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use crate::agent_mode_eval::tools::{ToolCall, ToolResult};
+use super::ai_client::{ChatMessage, ToolCall, ToolFunction};
+use super::tools::{Tool, ToolManager};
+use anyhow::{Result, anyhow};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
-    pub id: Uuid,
-    pub messages: Vec<Message>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub title: String,
+    pub id: String,
+    pub messages: Vec<ChatMessage>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub metadata: HashMap<String, String>,
 }
 
 impl Conversation {
-    pub fn new(title: String) -> Self {
-        let now = Utc::now();
+    pub fn new(id: String) -> Self {
+        let now = chrono::Utc::now();
         Self {
-            id: Uuid::new_v4(),
+            id,
             messages: Vec::new(),
             created_at: now,
             updated_at: now,
-            title,
+            metadata: HashMap::new(),
         }
     }
 
-    pub fn add_message(&mut self, message: Message) {
+    pub fn add_message(&mut self, message: ChatMessage) {
         self.messages.push(message);
-        self.updated_at = Utc::now();
+        self.updated_at = chrono::Utc::now();
     }
 
-    pub fn get_messages(&self) -> &[Message] {
+    pub fn get_messages(&self) -> &[ChatMessage] {
         &self.messages
     }
 
-    pub fn get_last_message(&self) -> Option<&Message> {
+    pub fn get_last_message(&self) -> Option<&ChatMessage> {
         self.messages.last()
     }
 
-    pub fn clear(&mut self) {
-        self.messages.clear();
-        self.updated_at = Utc::now();
+    pub fn set_metadata(&mut self, key: String, value: String) {
+        self.metadata.insert(key, value);
+        self.updated_at = chrono::Utc::now();
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub id: Uuid,
-    pub role: MessageRole,
-    pub content: String,
-    pub timestamp: DateTime<Utc>,
-    pub tool_calls: Option<Vec<ToolCall>>,
-    pub tool_results: Option<Vec<ToolResult>>,
-}
+    pub fn get_metadata(&self, key: &str) -> Option<&String> {
+        self.metadata.get(key)
+    }
 
-impl Message {
-    pub fn new(role: MessageRole, content: String) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            role,
-            content,
-            timestamp: Utc::now(),
-            tool_calls: None,
-            tool_results: None,
+    /// Executes tool calls from an AI message.
+    pub async fn execute_tool_calls(&mut self, tool_calls: Vec<ToolCall>, tool_manager: &ToolManager) -> Result<Vec<ChatMessage>> {
+        let mut tool_messages = Vec::new();
+        for tool_call in tool_calls {
+            log::info!("Executing tool call: {:?}", tool_call);
+            let tool_name = &tool_call.function.name;
+            let tool_args = &tool_call.function.arguments;
+
+            match tool_manager.get_tool(tool_name) {
+                Some(tool) => {
+                    match tool.execute(tool_args.clone()).await {
+                        Ok(output) => {
+                            log::info!("Tool '{}' executed successfully. Output: {}", tool_name, output);
+                            tool_messages.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: output,
+                                tool_calls: None,
+                                tool_call_id: Some(tool_call.id.clone()),
+                            });
+                        },
+                        Err(e) => {
+                            log::error!("Error executing tool '{}': {:?}", tool_name, e);
+                            tool_messages.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: format!("Error: {:?}", e),
+                                tool_calls: None,
+                                tool_call_id: Some(tool_call.id.clone()),
+                            });
+                        }
+                    }
+                },
+                None => {
+                    log::warn!("Tool '{}' not found.", tool_name);
+                    tool_messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: format!("Error: Tool '{}' not found.", tool_name),
+                        tool_calls: None,
+                        tool_call_id: Some(tool_call.id.clone()),
+                    });
+                }
+            }
         }
+        Ok(tool_messages)
     }
-
-    pub fn new_tool_call(tool_calls: Vec<ToolCall>) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            role: MessageRole::Assistant, // Tool calls are from assistant
-            content: String::new(),
-            timestamp: Utc::now(),
-            tool_calls: Some(tool_calls),
-            tool_results: None,
-        }
-    }
-
-    pub fn new_tool_result(tool_call_id: String, content: String, is_error: bool) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            role: MessageRole::Tool, // Tool results are from tool
-            content: content.clone(), // Content is the tool's output
-            timestamp: Utc::now(),
-            tool_calls: None,
-            tool_results: Some(vec![ToolResult { tool_call_id, content, is_error }]),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum MessageRole {
-    System,
-    User,
-    Assistant,
-    Tool,
 }

@@ -1,94 +1,106 @@
-use std::ops::{Add, AddAssign, Sub, SubAssign};
-use std::fmt;
+use anyhow::{Result, anyhow};
 
-/// A trait for types that can be used as values in a `SumTree`.
-/// These values must be able to be summed and subtracted.
-pub trait SumTreeValue:
-    Sized + Copy + Default + Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign + PartialEq + fmt::Debug
-{
-    // No additional methods needed, just trait bounds.
+// This module implements a Sum Tree (also known as a Fenwick tree or Binary Indexed Tree),
+// a data structure that can efficiently update elements and calculate prefix sums.
+// It's useful for applications like prioritized experience replay in RL, or
+// efficient range queries in text editors.
+
+pub struct SumTree {
+    tree: Vec<f64>, // Stores the sums
+    data: Vec<f64>, // Stores the actual values
+    capacity: usize,
 }
 
-// Implement for common numeric types
-impl SumTreeValue for usize {}
-impl SumTreeValue for u32 {}
-impl SumTreeValue for i32 {}
-impl SumTreeValue for f32 {}
-impl SumTreeValue for f64 {}
-
-/// A node in the `SumTree`.
-#[derive(Debug, Clone, Copy)]
-struct Node<T: SumTreeValue> {
-    value: T,
-    left: Option<usize>,
-    right: Option<usize>,
-    parent: Option<usize>,
-}
-
-/// A `SumTree` is a data structure that allows efficient querying of prefix sums
-/// and updating of individual elements. It's often used in scenarios like
-/// text buffers where you need to quickly find a character by its index
-/// or a line by its byte offset, and also efficiently insert/delete text.
-///
-/// Each leaf node represents an element, and internal nodes store the sum
-/// of their children's values.
-pub struct SumTree<T: SumTreeValue> {
-    nodes: Vec<Node<T>>,
-    root: Option<usize>,
-    next_node_idx: usize,
-}
-
-impl<T: SumTreeValue> SumTree<T> {
-    /// Creates a new empty `SumTree`.
-    pub fn new() -> Self {
+impl SumTree {
+    pub fn new(capacity: usize) -> Self {
+        let tree_size = capacity * 2 - 1; // For a complete binary tree
         Self {
-            nodes: Vec::new(),
-            root: None,
-            next_node_idx: 0,
+            tree: vec![0.0; tree_size],
+            data: vec![0.0; capacity],
+            capacity,
         }
     }
 
-    /// Inserts a new value at a specific index.
-    /// The index refers to the logical position in the sequence represented by the leaves.
-    pub fn insert(&mut self, index: usize, value: T) {
-        let new_node_idx = self.allocate_node(Node {
-            value,
-            left: None,
-            right: None,
-            parent: None,
-        });
+    pub fn init(&self) {
+        log::info!("Sum tree manager initialized.");
+    }
 
-        if self.root.is_none() {
-            self.root = Some(new_node_idx);
+    /// Creates a new SumTree from a vector of values.
+    pub fn create_tree(&self, values: Vec<f64>) -> SumTree {
+        let capacity = values.len();
+        let mut tree = SumTree::new(capacity);
+        for (i, &val) in values.iter().enumerate() {
+            tree.update(i, val);
+        }
+        tree
+    }
+
+    /// Updates the value at a given index and propagates the change up the tree.
+    pub fn update(&mut self, mut idx: usize, val: f64) {
+        if idx >= self.capacity {
+            log::warn!("Index {} out of bounds for SumTree with capacity {}", idx, self.capacity);
             return;
         }
+        let change = val - self.data[idx];
+        self.data[idx] = val;
 
-        // Find the insertion point (simplified for a basic implementation)
-        // A full implementation would traverse the tree to find the correct leaf
-        // and then rebalance/update sums up to the root.
-        // For this stub, we'll just add it as a new root if empty, or panic.
-        // This method is primarily illustrative of the concept.
-        if self.nodes.len() == 1 && self.root == Some(0) {
-            // If there's only one node, we need to create a new parent
-            let old_root_idx = self.root.unwrap();
-            let new_parent_idx = self.allocate_node(Node {
-                value: self.nodes[old_root_idx].value + value,
-                left: Some(old_root_idx),
-                right: Some(new_node_idx),
-                parent: None,
-            });
-            self.nodes[old_root_idx].parent = Some(new_parent_idx);
-            self.nodes[new_node_idx].parent = Some(new_parent_idx);
-            self.root = Some(new_parent_idx);
-        } else {
-            // This simplified insert only handles empty tree or adding to a single-node tree.
-            // A real SumTree would involve more complex tree manipulation.
-            panic!("Simplified SumTree insert only supports empty tree or adding to a single-node tree.");
+        // Adjust index to be 0-based for the data array, then map to tree index
+        idx += self.capacity - 1; // Leaf node index in the tree array
+
+        while idx >= 0 && idx < self.tree.len() {
+            self.tree[idx] += change;
+            if idx == 0 { break; } // Root node
+            idx = (idx - 1) / 2; // Move to parent
         }
     }
 
-    /// Updates the value of an element at a specific index.
-    /// This involves traversing to the leaf node and updating sums up to the root.
-    pub fn update(&mut self, index: usize, new_value: T) -> Result<(), String> {
-        // Find the leaf node corresponding to the index (simplified)
-        // In a
+    /// Queries the sum of values up to a given index (prefix sum).
+    pub fn query_prefix_sum(&self, mut idx: usize) -> f64 {
+        if idx >= self.capacity {
+            log::warn!("Query index {} out of bounds for SumTree with capacity {}", idx, self.capacity);
+            idx = self.capacity - 1; // Clamp to max index
+        }
+        let mut sum = 0.0;
+        idx += self.capacity - 1; // Leaf node index
+
+        while idx >= 0 && idx < self.tree.len() {
+            sum += self.tree[idx];
+            if idx == 0 { break; } // Root node
+            idx = (idx - 1) / 2; // Move to parent
+        }
+        sum
+    }
+
+    /// Retrieves the value at a specific index.
+    pub fn get_value(&self, idx: usize) -> Option<f64> {
+        self.data.get(idx).cloned()
+    }
+
+    /// Finds the index of the first element whose prefix sum is greater than or equal to `sum`.
+    pub fn query_index_by_sum(&self, mut sum: f64) -> Option<usize> {
+        let mut idx = 0; // Start at root
+
+        while idx < self.capacity - 1 { // While not a leaf node
+            let left_child_idx = 2 * idx + 1;
+            let right_child_idx = 2 * idx + 2;
+
+            if left_child_idx < self.tree.len() && sum <= self.tree[left_child_idx] {
+                idx = left_child_idx;
+            } else if right_child_idx < self.tree.len() {
+                if left_child_idx < self.tree.len() {
+                    sum -= self.tree[left_child_idx];
+                }
+                idx = right_child_idx;
+            } else {
+                // Should not happen in a well-formed tree if sum is within total
+                return None;
+            }
+        }
+        Some(idx - (self.capacity - 1)) // Convert back to data index
+    }
+
+    /// Returns the total sum of all elements in the tree.
+    pub fn total_sum(&self) -> f64 {
+        if self.tree.is_empty() { 0.0 } else { self.tree[0] } // Root contains total sum
+    }
+}

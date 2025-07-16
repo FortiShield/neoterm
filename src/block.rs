@@ -4,6 +4,152 @@ use iced::{
 };
 use uuid::Uuid;
 use chrono::{DateTime, Local};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block as TuiBlock, Borders, Paragraph};
+use ratatui::Frame;
+
+/// Represents a generic UI block in the terminal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockType {
+    Terminal,
+    Editor,
+    Info,
+    Welcome,
+    BenchmarkResults,
+    // Add more block types as needed
+}
+
+/// State for a UI block.
+#[derive(Debug, Clone)]
+pub struct BlockState {
+    pub block_type: BlockType,
+    pub title: String,
+    pub content: Vec<Line<'static>>,
+    pub is_active: bool,
+    pub area: Rect,
+}
+
+impl BlockState {
+    pub fn new(block_type: BlockType, title: String, content: Vec<Line<'static>>) -> Self {
+        Self {
+            block_type,
+            title,
+            content,
+            is_active: false,
+            area: Rect::default(),
+        }
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.is_active = active;
+    }
+
+    pub fn set_area(&mut self, area: Rect) {
+        self.area = area;
+    }
+
+    pub fn render(&self, frame: &mut Frame) {
+        let border_style = if self.is_active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let block = TuiBlock::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(self.title.clone(), Style::default().fg(Color::LightGreen)));
+
+        let paragraph = Paragraph::new(self.content.clone())
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false });
+
+        frame.render_widget(paragraph, self.area);
+    }
+}
+
+/// Manages multiple UI blocks.
+#[derive(Debug, Clone)]
+pub struct BlockManager {
+    pub blocks: Vec<BlockState>,
+    pub active_block_index: usize,
+}
+
+impl BlockManager {
+    pub fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            active_block_index: 0,
+        }
+    }
+
+    pub fn add_block(&mut self, block: BlockState) {
+        self.blocks.push(block);
+        // If this is the first block, make it active
+        if self.blocks.len() == 1 {
+            self.blocks[0].set_active(true);
+        }
+    }
+
+    pub fn get_active_block_mut(&mut self) -> Option<&mut BlockState> {
+        self.blocks.get_mut(self.active_block_index)
+    }
+
+    pub fn get_active_block(&self) -> Option<&BlockState> {
+        self.blocks.get(self.active_block_index)
+    }
+
+    pub fn next_block(&mut self) {
+        if !self.blocks.is_empty() {
+            self.blocks[self.active_block_index].set_active(false);
+            self.active_block_index = (self.active_block_index + 1) % self.blocks.len();
+            self.blocks[self.active_block_index].set_active(true);
+        }
+    }
+
+    pub fn previous_block(&mut self) {
+        if !self.blocks.is_empty() {
+            self.blocks[self.active_block_index].set_active(false);
+            self.active_block_index = (self.active_block_index + self.blocks.len() - 1) % self.blocks.len();
+            self.blocks[self.active_block_index].set_active(true);
+        }
+    }
+
+    pub fn update_layout(&mut self, area: Rect) {
+        if self.blocks.is_empty() {
+            return;
+        }
+
+        let constraints: Vec<Constraint> = self.blocks.iter()
+            .map(|_| Constraint::Percentage(100 / self.blocks.len() as u16))
+            .collect();
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
+        for (i, block_area) in layout.iter().enumerate() {
+            if let Some(block) = self.blocks.get_mut(i) {
+                block.set_area(*block_area);
+            }
+        }
+    }
+
+    pub fn set_block_content(&mut self, block_type: BlockType, content: Vec<Line<'static>>) {
+        if let Some(block) = self.blocks.iter_mut().find(|b| b.block_type == block_type) {
+            block.content = content;
+        } else {
+            log::warn!("Block of type {:?} not found to update content.", block_type);
+        }
+    }
+
+    pub fn get_block_content(&self, block_type: BlockType) -> Option<&Vec<Line<'static>>> {
+        self.blocks.iter().find(|b| b.block_type == block_type).map(|b| &b.content)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum BlockContent {
@@ -248,4 +394,8 @@ impl Block {
         })
         .into()
     }
+}
+
+pub fn init() {
+    log::info!("Block module initialized.");
 }

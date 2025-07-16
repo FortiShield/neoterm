@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use anyhow::Result;
+use tree_sitter::{Language, Parser};
 
 /// Represents a programming language supported by NeoTerm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,20 +38,49 @@ impl Default for CommentSyntax {
 
 /// Manages supported programming languages and their configurations.
 pub struct LanguageManager {
+    parsers: Arc<Mutex<HashMap<String, Parser>>>,
     languages: HashMap<String, Language>, // Keyed by language name
+    // Add Syntect theme set and syntax set for highlighting
+    // syntax_set: Arc<Mutex<syntect::parsing::SyntaxSet>>,
+    // theme_set: Arc<Mutex<syntect::highlighting::ThemeSet>>,
 }
 
 impl LanguageManager {
     pub fn new() -> Self {
-        let mut manager = Self {
+        Self {
+            parsers: Arc::new(Mutex::new(HashMap::new())),
             languages: HashMap::new(),
-        };
-        manager.load_default_languages();
-        manager
+            // syntax_set: Arc::new(Mutex::new(syntect::parsing::SyntaxSet::load_defaults_newlines())),
+            // theme_set: Arc::new(Mutex::new(syntect::highlighting::ThemeSet::load_defaults())),
+        }
     }
 
-    fn load_default_languages(&mut self) {
-        self.register_language(Language {
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Language manager initialized.");
+        self.load_default_languages().await?;
+        Ok(())
+    }
+
+    async fn load_default_languages(&self) -> Result<()> {
+        let mut parsers = self.parsers.lock().await;
+        let mut languages = self.languages.lock().await;
+
+        // Load Tree-sitter languages
+        // Ensure these grammars are built and available (e.g., via build.rs)
+        // For example:
+        // parsers.insert("rust".to_string(), {
+        //     let mut parser = Parser::new();
+        //     parser.set_language(tree_sitter_rust::language())?;
+        //     parser
+        // });
+        parsers.insert("bash".to_string(), {
+            let mut parser = Parser::new();
+            parser.set_language(tree_sitter_bash::language())?;
+            parser
+        });
+
+        // Register languages
+        languages.insert("Rust".to_string(), Language {
             name: "Rust".to_string(),
             extensions: vec!["rs".to_string()],
             syntax_highlight_scope: "source.rust".to_string(),
@@ -62,7 +95,7 @@ impl LanguageManager {
             run_command: Some("cargo run".to_string()),
         });
 
-        self.register_language(Language {
+        languages.insert("Python".to_string(), Language {
             name: "Python".to_string(),
             extensions: vec!["py".to_string()],
             syntax_highlight_scope: "source.python".to_string(),
@@ -77,7 +110,7 @@ impl LanguageManager {
             run_command: Some("python".to_string()),
         });
 
-        self.register_language(Language {
+        languages.insert("JavaScript".to_string(), Language {
             name: "JavaScript".to_string(),
             extensions: vec!["js".to_string(), "jsx".to_string(), "mjs".to_string(), "cjs".to_string()],
             syntax_highlight_scope: "source.js".to_string(),
@@ -91,6 +124,42 @@ impl LanguageManager {
             build_command: Some("npm run build".to_string()),
             run_command: Some("node".to_string()),
         });
+
+        log::info!("Loaded {} Tree-sitter languages.", parsers.len());
+        Ok(())
+    }
+
+    pub async fn get_parser(&self, language_name: &str) -> Option<Parser> {
+        let parsers = self.parsers.lock().await;
+        parsers.get(language_name).cloned()
+    }
+
+    /// Example: Parse code and return a syntax tree.
+    pub async fn parse_code(&self, language_name: &str, code: &str) -> Result<String> {
+        let mut parsers = self.parsers.lock().await;
+        if let Some(parser) = parsers.get_mut(language_name) {
+            if let Some(tree) = parser.parse(code, None) {
+                Ok(tree.root_node().to_sexp())
+            } else {
+                Err(anyhow::anyhow!("Failed to parse code for language: {}", language_name))
+            }
+        } else {
+            Err(anyhow::anyhow!("Language parser not found for: {}", language_name))
+        }
+    }
+
+    /// Example: Get syntax highlighting for a line of code.
+    pub async fn highlight_line(&self, _language_name: &str, _line: &str) -> Result<Vec<(syntect::highlighting::Style, &str)>> {
+        // This would use Syntect
+        // let syntax_set = self.syntax_set.lock().await;
+        // let theme_set = self.theme_set.lock().await;
+        // let syntax = syntax_set.find_syntax_by_name(language_name)
+        //     .ok_or_else(|| anyhow::anyhow!("Syntax not found for: {}", language_name))?;
+        // let theme = &theme_set.themes["base16-ocean.dark"]; // Or load from config
+        // let mut highlighter = syntect::highlighting::Highlighter::new(theme);
+        // let regions = highlighter.highlight_line(line, syntax, &syntax_set)?;
+        // Ok(regions)
+        Ok(vec![]) // Placeholder
     }
 
     /// Registers a new language.
@@ -115,5 +184,5 @@ impl LanguageManager {
 }
 
 pub fn init() {
-    println!("languages module loaded");
+    log::info!("Languages module initialized.");
 }

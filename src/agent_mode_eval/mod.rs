@@ -11,6 +11,12 @@ use crate::command::CommandExecutor;
 use crate::config::Config;
 use crate::agent_mode_eval::conversation::{Conversation, Message, MessageRole};
 use crate::agent_mode_eval::tools::{Tool, ToolRegistry, ToolCall, ToolResult};
+use ai_client::{AIClient, ChatMessage, AiConfig, OpenAIClient};
+use conversation::Conversation;
+use tools::ToolManager;
+use anyhow::{Result, anyhow};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub mod ai_client;
 pub mod conversation;
@@ -308,6 +314,109 @@ impl AgentMode {
                 }
             }
         }
+    }
+}
+
+pub struct AgentModeEvaluator {
+    ai_client: Arc<dyn AIClient>,
+    tool_manager: Arc<Mutex<ToolManager>>,
+    current_conversation: Arc<Mutex<Conversation>>,
+    system_prompt: String,
+}
+
+impl AgentModeEvaluator {
+    pub fn new(ai_config: AiConfig, initial_system_prompt: String) -> Self {
+        let ai_client = Arc::new(OpenAIClient::new(ai_config));
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new()));
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let current_conversation = Arc::new(Mutex::new(Conversation::new(conversation_id)));
+
+        // Add initial system message to conversation
+        let mut conv = current_conversation.blocking_lock();
+        conv.add_message(ChatMessage {
+            role: "system".to_string(),
+            content: initial_system_prompt.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        drop(conv); // Release the lock
+
+        AgentModeEvaluator {
+            ai_client,
+            tool_manager,
+            current_conversation,
+            system_prompt: initial_system_prompt,
+        }
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        // Initialize tools if necessary
+        let mut tool_manager = self.tool_manager.lock().await;
+        tool_manager.register_default_tools().await?;
+        Ok(())
+    }
+
+    pub async fn handle_user_input(&self, input: String) -> Result<Vec<ChatMessage>> {
+        let mut conversation = self.current_conversation.lock().await;
+        conversation.add_message(ChatMessage {
+            role: "user".to_string(),
+            content: input,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let mut response_messages = Vec::new();
+        let mut current_messages = conversation.get_messages().to_vec();
+        let tool_manager = self.tool_manager.lock().await;
+        let available_tools = tool_manager.get_all_tools_schema();
+        drop(tool_manager); // Release lock on tool_manager
+
+        loop {
+            log::info!("Sending messages to AI: {:?}", current_messages);
+            let ai_response = self.ai_client.chat_completion(current_messages.clone(), Some(available_tools.clone())).await?;
+            log::info!("Received AI response: {:?}", ai_response);
+
+            conversation.add_message(ai_response.clone());
+            response_messages.push(ai_response.clone());
+
+            if let Some(tool_calls) = ai_response.tool_calls {
+                let tool_manager = self.tool_manager.lock().await;
+                let tool_outputs = conversation.execute_tool_calls(tool_calls, &tool_manager).await?;
+                drop(tool_manager); // Release lock on tool_manager
+
+                for output_msg in tool_outputs {
+                    log::info!("Adding tool output to conversation: {:?}", output_msg);
+                    conversation.add_message(output_msg.clone());
+                    current_messages.push(output_msg); // Add tool output to messages for next AI call
+                }
+                current_messages.push(ai_response); // Add AI's tool_call message to messages for next AI call
+            } else {
+                // If no tool calls, and content is present, the conversation can end.
+                // If content is empty, it might be waiting for tool outputs.
+                if !ai_response.content.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        Ok(response_messages)
+    }
+
+    pub async fn get_conversation_history(&self) -> Vec<ChatMessage> {
+        self.current_conversation.lock().await.get_messages().to_vec()
+    }
+
+    pub async fn reset_conversation(&self) {
+        let mut conversation = self.current_conversation.lock().await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        *conversation = Conversation::new(conversation_id);
+        // Re-add the system prompt after reset
+        conversation.add_message(ChatMessage {
+            role: "system".to_string(),
+            content: self.system_prompt.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
     }
 }
 

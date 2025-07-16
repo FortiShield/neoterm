@@ -1,205 +1,185 @@
-use ratatui::{
-    backend::Backend,
-    layout::{Constraint, Direction, Layout, Rect, Alignment},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
-    Frame,
-};
-use serde::{Deserialize, Serialize};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
+use tui_textarea::{TextArea, Input, Key};
+use crate::fuzzy_match::{FuzzyMatchManager, FuzzyMatchResult};
 use std::collections::HashMap;
-use crate::fuzzy_match;
-use iced::{Element, widget::{column, text_input, text, button, row}};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Command {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub category: CommandCategory,
-    pub keybinding: Option<String>,
-    pub action: CommandAction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CommandCategory {
-    Navigation,
-    Editing,
-    Terminal,
-    AI,
-    Workflow,
-    Settings,
-    System,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CommandAction {
-    ToggleAgentMode,
-    ToggleSettings,
-    RunBenchmarks,
-    ClearHistory,
-    // Add more commands here
-    CustomCommand(String), // For dynamic commands
-}
-
-#[derive(Debug, Clone)]
-pub enum Message {
-    Toggle,
-    InputChanged(String),
-    ExecuteSelected,
-    Navigate(Direction),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Up,
-    Down,
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandPalette {
+    input_area: TextArea<'static>,
     is_open: bool,
-    input_value: String,
-    filtered_commands: Vec<CommandAction>,
-    active_selection: Option<usize>,
+    commands: HashMap<String, String>, // command_id -> command_description
+    filtered_commands: Vec<FuzzyMatchResult>,
+    selected_index: usize,
+    fuzzy_matcher: FuzzyMatchManager,
 }
 
 impl CommandPalette {
     pub fn new() -> Self {
+        let mut commands = HashMap::new();
+        commands.insert("app.quit".to_string(), "Quit NeoTerm".to_string());
+        commands.insert("ui.next_block".to_string(), "Switch to next UI block".to_string());
+        commands.insert("app.run_benchmarks".to_string(), "Run performance benchmarks".to_string());
+        commands.insert("ai.chat".to_string(), "Send message to AI assistant".to_string());
+        commands.insert("config.edit".to_string(), "Edit preferences".to_string());
+        commands.insert("theme.edit".to_string(), "Edit current theme".to_string());
+        commands.insert("workflow.run".to_string(), "Run a workflow".to_string());
+        commands.insert("plugin.list".to_string(), "List installed plugins".to_string());
+
         Self {
+            input_area: TextArea::default(),
             is_open: false,
-            input_value: String::new(),
-            filtered_commands: Self::get_all_commands(),
-            active_selection: None,
+            commands,
+            filtered_commands: Vec::new(),
+            selected_index: 0,
+            fuzzy_matcher: FuzzyMatchManager::new(),
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Option<CommandAction> {
-        match message {
-            Message::Toggle => {
-                self.is_open = !self.is_open;
-                if self.is_open {
-                    self.input_value.clear();
-                    self.filter_commands();
-                    self.active_selection = None;
-                }
-                None
-            }
-            Message::InputChanged(value) => {
-                self.input_value = value;
-                self.filter_commands();
-                self.active_selection = None; // Reset selection on input change
-                None
-            }
-            Message::ExecuteSelected => {
-                if let Some(index) = self.active_selection {
-                    if let Some(action) = self.filtered_commands.get(index) {
-                        self.is_open = false; // Close palette on execution
-                        return Some(action.clone());
-                    }
-                }
-                None
-            }
-            Message::Navigate(direction) => {
-                if self.filtered_commands.is_empty() {
-                    return None;
-                }
-                let new_index = match self.active_selection {
-                    Some(i) => match direction {
-                        Direction::Up => i.checked_sub(1).unwrap_or(self.filtered_commands.len() - 1),
-                        Direction::Down => (i + 1) % self.filtered_commands.len(),
-                    },
-                    None => match direction {
-                        Direction::Up => self.filtered_commands.len() - 1,
-                        Direction::Down => 0,
-                    },
-                };
-                self.active_selection = Some(new_index);
-                None
-            }
-        }
+    pub fn init(&self) {
+        log::info!("Command palette initialized.");
     }
 
-    pub fn view(&mut self) -> Element<Message> {
-        if !self.is_open {
-            return column![].into();
-        }
-
-        let input = text_input("Search commands...", &self.input_value)
-            .on_input(Message::InputChanged)
-            .on_submit(Message::ExecuteSelected)
-            .padding(10)
-            .size(16);
-
-        let command_list: Vec<Element<Message>> = self.filtered_commands
-            .iter()
-            .enumerate()
-            .map(|(i, cmd)| {
-                let is_active = self.active_selection == Some(i);
-                let cmd_text = match cmd {
-                    CommandAction::ToggleAgentMode => "Toggle AI Agent".to_string(),
-                    CommandAction::ToggleSettings => "Open Settings".to_string(),
-                    CommandAction::RunBenchmarks => "Run Performance Benchmarks".to_string(),
-                    CommandAction::ClearHistory => "Clear Command History".to_string(),
-                    CommandAction::CustomCommand(s) => s.clone(),
-                };
-
-                container(
-                    text(cmd_text).size(14)
-                )
-                .padding(8)
-                .style(move |theme| {
-                    if is_active {
-                        container::Appearance {
-                            background: Some(theme.palette().primary.scale_alpha(0.1).into()),
-                            ..Default::default()
-                        }
-                    } else {
-                        container::Appearance::default()
-                    }
-                })
-                .on_press(Message::ExecuteSelected) // Clicking selects and executes
-                .into()
-            })
-            .collect();
-
-        column![
-            input,
-            column(command_list).spacing(2)
-        ]
-        .spacing(5)
-        .padding(10)
-        .into()
+    pub fn open(&mut self) {
+        self.is_open = true;
+        self.input_area.set_cursor_line_style(Style::default());
+        self.input_area.set_cursor_style(Style::default().bg(Color::White).fg(Color::Black));
+        self.update_filtered_commands();
     }
 
-    fn get_all_commands() -> Vec<CommandAction> {
-        vec![
-            CommandAction::ToggleAgentMode,
-            CommandAction::ToggleSettings,
-            CommandAction::RunBenchmarks,
-            CommandAction::ClearHistory,
-            // Add more static commands here
-        ]
-    }
-
-    fn filter_commands(&mut self) {
-        let query = self.input_value.to_lowercase();
-        self.filtered_commands = Self::get_all_commands()
-            .into_iter()
-            .filter(|cmd| {
-                let cmd_name = match cmd {
-                    CommandAction::ToggleAgentMode => "toggle ai agent",
-                    CommandAction::ToggleSettings => "open settings",
-                    CommandAction::RunBenchmarks => "run performance benchmarks",
-                    CommandAction::ClearHistory => "clear command history",
-                    CommandAction::CustomCommand(s) => s.to_lowercase().as_str(),
-                };
-                cmd_name.contains(&query)
-            })
-            .collect();
+    pub fn close(&mut self) {
+        self.is_open = false;
+        self.input_area.set_lines(vec!["".to_string()]);
+        self.selected_index = 0;
     }
 
     pub fn is_open(&self) -> bool {
         self.is_open
+    }
+
+    pub fn handle_input(&mut self, input: Input) -> Option<String> {
+        match input {
+            Input { key: Key::Esc, .. } => {
+                self.close();
+                None
+            },
+            Input { key: Key::Enter, .. } => {
+                if !self.filtered_commands.is_empty() {
+                    let selected_command_id = self.filtered_commands[self.selected_index].text.clone();
+                    self.close();
+                    Some(selected_command_id)
+                } else {
+                    None
+                }
+            },
+            Input { key: Key::Up, .. } => {
+                if !self.filtered_commands.is_empty() {
+                    self.selected_index = self.selected_index.saturating_sub(1);
+                }
+                None
+            },
+            Input { key: Key::Down, .. } => {
+                if !self.filtered_commands.is_empty() {
+                    self.selected_index = (self.selected_index + 1).min(self.filtered_commands.len() - 1);
+                }
+                None
+            },
+            _ => {
+                self.input_area.input(input);
+                self.update_filtered_commands();
+                None
+            }
+        }
+    }
+
+    fn update_filtered_commands(&mut self) {
+        let query = self.input_area.lines().join("").to_lowercase();
+        let candidate_ids: Vec<String> = self.commands.keys().cloned().collect();
+        
+        self.filtered_commands = self.fuzzy_matcher.fuzzy_match(&query, &candidate_ids);
+        self.selected_index = 0; // Reset selection on filter change
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        if !self.is_open {
+            return;
+        }
+
+        let popup_area = CommandPalette::centered_rect(60, 40, area); // 60% width, 40% height
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Input area
+                Constraint::Min(0),    // Results area
+            ])
+            .split(popup_area);
+
+        // Input area
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled("Command Palette", Style::default().fg(Color::LightYellow)));
+        
+        let mut input_widget = self.input_area.widget();
+        input_widget = input_widget.block(input_block);
+        frame.render_widget(input_widget, chunks[0]);
+
+        // Results area
+        let results_block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled("Results", Style::default().fg(Color::LightGreen)));
+
+        let mut result_lines: Vec<Line> = Vec::new();
+        for (i, result) in self.filtered_commands.iter().enumerate() {
+            let command_id = &result.text;
+            let description = self.commands.get(command_id).unwrap_or(&command_id);
+            let line_content = format!("{}: {}", command_id, description);
+            
+            let mut spans = Vec::new();
+            let mut last_idx = 0;
+            for &match_idx in &result.indices {
+                if match_idx >= line_content.len() { continue; }
+                spans.push(Span::raw(&line_content[last_idx..match_idx]));
+                spans.push(Span::styled(
+                    line_content.chars().nth(match_idx).unwrap().to_string(),
+                    Style::default().fg(Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD),
+                ));
+                last_idx = match_idx + line_content.chars().nth(match_idx).unwrap().len_utf8();
+            }
+            spans.push(Span::raw(&line_content[last_idx..]));
+
+            let mut line = Line::from(spans);
+            if i == self.selected_index {
+                line = line.style(Style::default().bg(Color::DarkGray));
+            }
+            result_lines.push(line);
+        }
+
+        let results_paragraph = Paragraph::new(result_lines)
+            .block(results_block)
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        frame.render_widget(results_paragraph, chunks[1]);
+    }
+
+    fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+        let popup_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ])
+            .split(r);
+
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ])
+            .split(popup_layout[1])[1]
     }
 }

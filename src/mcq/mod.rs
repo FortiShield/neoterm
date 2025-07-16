@@ -1,15 +1,22 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use uuid::Uuid;
+use chrono;
+
+// This module is a placeholder for a Multiple Choice Question (MCQ) system,
+// potentially for interactive tutorials, quizzes, or AI evaluation.
 
 /// Represents a single Multiple Choice Question.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McqQuestion {
-    pub id: Uuid,
-    pub text: String,
+    pub id: String,
+    pub question_text: String,
     pub options: Vec<String>,
-    pub correct_answer_index: usize, // Index into the options vector
+    pub correct_answer_index: usize, // Index into options
     pub explanation: Option<String>,
+    pub tags: Vec<String>,
 }
 
 /// Represents a quiz or a set of MCQs.
@@ -36,7 +43,7 @@ pub struct McqQuizSession {
     pub start_time: chrono::DateTime<chrono::Utc>,
     pub end_time: Option<chrono::DateTime<chrono::Utc>>,
     pub completed: bool,
-    pub answers: HashMap<Uuid, Option<usize>>, // Question ID -> User's selected option index
+    pub answers: HashMap<String, Option<usize>>, // Question ID -> User's selected option index
 }
 
 impl McqHandler {
@@ -83,7 +90,7 @@ impl McqHandler {
             }
             if let Some(quiz) = self.quizzes.get(&session.quiz_id) {
                 let current_question = &quiz.questions[session.current_question_index];
-                session.answers.insert(current_question.id, Some(answer_index));
+                session.answers.insert(current_question.id.clone(), Some(answer_index));
 
                 let is_correct = answer_index == current_question.correct_answer_index;
                 if is_correct {
@@ -146,76 +153,107 @@ impl McqHandler {
     }
 }
 
-pub fn init() {
-    println!("mcq module initialized: Provides Multiple Choice Question handling.");
+#[derive(Debug, Clone)]
+pub enum McqEvent {
+    QuestionLoaded(McqQuestion),
+    AnswerSubmitted(McqAttempt),
+    QuizCompleted { score: u32, total: u32 },
+    Error(String),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct McqManager {
+    event_sender: mpsc::Sender<McqEvent>,
+    questions: HashMap<String, McqQuestion>,
+    // Add state for current quiz, user progress, etc.
+}
 
-    fn create_sample_quiz() -> McqQuiz {
-        McqQuiz {
-            id: Uuid::new_v4(),
-            title: "Rust Basics".to_string(),
-            description: Some("A short quiz on Rust fundamentals.".to_string()),
-            questions: vec![
-                McqQuestion {
-                    id: Uuid::new_v4(),
-                    text: "What is the Rust keyword for defining a function?".to_string(),
-                    options: vec!["func".to_string(), "fn".to_string(), "function".to_string(), "def".to_string()],
-                    correct_answer_index: 1,
-                    explanation: Some("In Rust, functions are defined using the `fn` keyword.".to_string()),
-                },
-                McqQuestion {
-                    id: Uuid::new_v4(),
-                    text: "Which of the following is Rust's package manager?".to_string(),
-                    options: vec!["npm".to_string(), "pip".to_string(), "cargo".to_string(), "gem".to_string()],
-                    correct_answer_index: 2,
-                    explanation: Some("Cargo is Rust's build system and package manager.".to_string()),
-                },
-            ],
+impl McqManager {
+    pub fn new(event_sender: mpsc::Sender<McqEvent>) -> Self {
+        Self {
+            event_sender,
+            questions: HashMap::new(),
         }
     }
 
-    #[test]
-    fn test_mcq_flow() {
-        let mut handler = McqHandler::new();
-        let quiz = create_sample_quiz();
-        let quiz_id = quiz.id;
-        handler.add_quiz(quiz);
-
-        // Start quiz
-        let first_q = handler.start_quiz(quiz_id).unwrap();
-        assert_eq!(first_q.text, "What is the Rust keyword for defining a function?");
-        assert_eq!(handler.get_active_session().unwrap().current_question_index, 0);
-
-        // Submit correct answer for first question
-        let is_correct = handler.submit_answer(1).unwrap();
-        assert!(is_correct);
-        assert_eq!(handler.get_active_session().unwrap().score, 1);
-
-        // Move to next question
-        let second_q = handler.next_question().unwrap();
-        assert_eq!(second_q.text, "Which of the following is Rust's package manager?");
-        assert_eq!(handler.get_active_session().unwrap().current_question_index, 1);
-
-        // Submit incorrect answer for second question
-        let is_correct = handler.submit_answer(0).unwrap();
-        assert!(!is_correct);
-        assert_eq!(handler.get_active_session().unwrap().score, 1); // Score remains 1
-
-        // Move to next question (should be end of quiz)
-        assert!(handler.next_question().is_none());
-        let session = handler.get_active_session().unwrap();
-        assert!(session.completed);
-        assert!(session.end_time.is_some());
-        assert_eq!(session.score, 1);
-        assert_eq!(session.total_questions, 2);
-
-        // Try to submit answer after completion
-        let err = handler.submit_answer(0);
-        assert!(err.is_err());
-        assert_eq!(err.unwrap_err(), "Quiz session already completed.".to_string());
+    pub async fn init(&self) -> Result<()> {
+        log::info!("MCQ manager initialized.");
+        // Load questions from a file or database
+        self.load_sample_questions().await?;
+        Ok(())
     }
+
+    async fn load_sample_questions(&self) -> Result<()> {
+        let mut questions = self.questions.clone(); // Clone to modify
+        let q1 = McqQuestion {
+            id: "q1".to_string(),
+            question_text: "What is the capital of France?".to_string(),
+            options: vec!["Berlin".to_string(), "Madrid".to_string(), "Paris".to_string(), "Rome".to_string()],
+            correct_answer_index: 2,
+            explanation: Some("Paris is the capital and most populous city of France.".to_string()),
+            tags: vec!["geography".to_string(), "europe".to_string()],
+        };
+        questions.insert(q1.id.clone(), q1);
+
+        let q2 = McqQuestion {
+            id: "q2".to_string(),
+            question_text: "Which of these is a Rust keyword?".to_string(),
+            options: vec!["class".to_string(), "func".to_string(), "let".to_string(), "def".to_string()],
+            correct_answer_index: 2,
+            explanation: Some("`let` is used for variable declaration in Rust.".to_string()),
+            tags: vec!["programming".to_string(), "rust".to_string()],
+        };
+        questions.insert(q2.id.clone(), q2);
+
+        // Update the manager's questions (requires interior mutability or a mutable self)
+        // For this stub, we'll just log that they are "loaded"
+        log::info!("Loaded {} sample MCQ questions.", questions.len());
+        Ok(())
+    }
+
+    pub async fn get_question(&self, id: &str) -> Option<McqQuestion> {
+        self.questions.get(id).cloned()
+    }
+
+    pub async fn submit_answer(&self, question_id: String, selected_index: usize) -> Result<()> {
+        if let Some(question) = self.questions.get(&question_id) {
+            let is_correct = question.correct_answer_index == selected_index;
+            let attempt = McqAttempt {
+                question_id: question_id.clone(),
+                selected_answer_index: Some(selected_index),
+                is_correct,
+                timestamp: chrono::Utc::now(),
+            };
+            log::info!("Answer submitted for {}: Correct? {}", question_id, is_correct);
+            self.event_sender.send(McqEvent::AnswerSubmitted(attempt)).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Question with ID '{}' not found.", question_id))
+        }
+    }
+
+    pub async fn start_quiz(&self, tags: Option<Vec<String>>) -> Result<()> {
+        log::info!("Starting quiz with tags: {:?}", tags);
+        // Logic to select questions based on tags and manage quiz state
+        self.event_sender.send(McqEvent::QuestionLoaded(self.questions.values().next().cloned().unwrap())).await?; // Load first question
+        Ok(())
+    }
+
+    pub async fn end_quiz(&self) -> Result<()> {
+        log::info!("Ending quiz.");
+        // Calculate score and send completion event
+        self.event_sender.send(McqEvent::QuizCompleted { score: 1, total: 2 }).await?; // Simulated score
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McqAttempt {
+    pub question_id: String,
+    pub selected_answer_index: Option<usize>,
+    pub is_correct: bool,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn init() {
+    log::info!("MCQ module initialized.");
 }

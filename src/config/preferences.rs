@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
+use anyhow::Result;
+use tokio::fs;
+use super::CONFIG_DIR;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPreferences {
@@ -31,6 +35,35 @@ pub struct UserPreferences {
     pub enable_session_sharing: bool,
     pub enable_plugins: bool,
     pub default_environment_profile: Option<String>,
+    pub terminal_font_size: u16,
+    pub terminal_font_family: String,
+    pub theme_name: String,
+    pub enable_ai_assistant: bool,
+    pub enable_collaboration: bool,
+    pub ai_api_key: Option<String>,
+    pub ai_model: String,
+    pub ai_temperature: f32,
+    pub ai_max_tokens: u32,
+    pub keybindings_file: String,
+    pub enable_performance_profiling: bool,
+    pub enable_wasm_plugins: bool,
+    pub enable_lua_plugins: bool,
+    pub enable_virtual_fs: bool,
+    pub enable_graphql_api: bool,
+    pub enable_natural_language_detection: bool,
+    pub enable_markdown_preview: bool,
+    pub enable_syntax_tree: bool,
+    pub enable_fuzzy_match: bool,
+    pub enable_lpc_support: bool,
+    pub enable_mcq_support: bool,
+    pub enable_asset_macro: bool,
+    pub enable_workflow_engine: bool,
+    pub enable_debugger: bool,
+    pub enable_drive_integration: bool,
+    pub enable_watcher: bool,
+    pub enable_websocket_server: bool,
+    pub enable_cli_integration: bool,
+    pub enable_distribution_packaging: bool, // New field for Phase 10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +281,35 @@ impl Default for UserPreferences {
             enable_session_sharing: false,
             enable_plugins: true,
             default_environment_profile: None,
+            terminal_font_size: 14,
+            terminal_font_family: "Fira Code".to_string(),
+            theme_name: "nord".to_string(),
+            enable_ai_assistant: true,
+            enable_collaboration: false,
+            ai_api_key: None,
+            ai_model: "gpt-4o".to_string(),
+            ai_temperature: 0.7,
+            ai_max_tokens: 500,
+            keybindings_file: "keybindings.yaml".to_string(),
+            enable_performance_profiling: true,
+            enable_wasm_plugins: true,
+            enable_lua_plugins: true,
+            enable_virtual_fs: false,
+            enable_graphql_api: false,
+            enable_natural_language_detection: false,
+            enable_markdown_preview: true,
+            enable_syntax_tree: false,
+            enable_fuzzy_match: true,
+            enable_lpc_support: false,
+            enable_mcq_support: false,
+            enable_asset_macro: false,
+            enable_workflow_engine: true,
+            enable_debugger: false,
+            enable_drive_integration: false,
+            enable_watcher: true,
+            enable_websocket_server: false,
+            enable_cli_integration: true,
+            enable_distribution_packaging: true, // Default to true for new phase
         }
     }
 }
@@ -425,6 +487,35 @@ impl Default for PluginConfig {
             auto_update_plugins: true,
             allow_unsigned_plugins: false,
         }
+    }
+}
+
+impl UserPreferences {
+    pub fn path() -> PathBuf {
+        CONFIG_DIR.join("preferences.json")
+    }
+
+    pub async fn load() -> Result<Self> {
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path).await?;
+            let prefs: UserPreferences = serde_json::from_str(&contents)?;
+            log::info!("Preferences loaded from {:?}", path);
+            Ok(prefs)
+        } else {
+            log::info!("Preferences file not found at {:?}, creating default.", path);
+            let default_prefs = Self::default();
+            default_prefs.save().await?;
+            Ok(default_prefs)
+        }
+    }
+
+    pub async fn save(&self) -> Result<()> {
+        let path = Self::path();
+        let contents = serde_json::to_string_pretty(self)?;
+        fs::write(&path, contents).await?;
+        log::info!("Preferences saved to {:?}", path);
+        Ok(())
     }
 }
 

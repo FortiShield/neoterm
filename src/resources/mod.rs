@@ -1,104 +1,97 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use tokio::fs;
 
-/// Represents a generic resource that can be loaded from the file system.
-#[derive(Debug, Clone)]
-pub enum Resource {
-    Text(String),
-    Binary(Vec<u8>),
-    Json(serde_json::Value),
-    Yaml(serde_yaml::Value),
-    // Add other resource types as needed (e.g., Image, Audio)
+// This module manages application resources such as icons, images, sounds,
+// and other static assets. It can handle loading them from disk or embedded
+// sources (e.g., using `asset_macro`).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ResourceType {
+    Image,
+    Icon,
+    Sound,
+    Font,
+    Other,
 }
 
-/// Manages loading and accessing application resources (e.g., themes, workflows, icons).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resource {
+    pub id: String,
+    pub name: String,
+    pub resource_type: ResourceType,
+    pub path: PathBuf, // Path to the resource file
+    pub metadata: HashMap<String, String>, // e.g., "format": "png", "size": "1024x768"
+}
+
 pub struct ResourceManager {
-    base_path: PathBuf,
-    loaded_resources: HashMap<String, Resource>, // Keyed by relative path or ID
+    resources: HashMap<String, Resource>,
+    resource_dir: PathBuf,
 }
 
 impl ResourceManager {
-    /// Creates a new `ResourceManager` instance with a specified base path.
-    pub fn new(base_path: PathBuf) -> Self {
+    pub fn new() -> Self {
+        let resource_dir = PathBuf::from("./assets"); // Or use a config-defined path
         Self {
-            base_path,
-            loaded_resources: HashMap::new(),
+            resources: HashMap::new(),
+            resource_dir,
         }
     }
 
-    /// Loads a resource from a given relative path.
-    /// The resource type is inferred from the file extension.
-    pub fn load_resource(&mut self, relative_path: &Path) -> Result<&Resource, String> {
-        let full_path = self.base_path.join(relative_path);
-        let key = relative_path.to_string_lossy().into_owned();
-
-        if self.loaded_resources.contains_key(&key) {
-            return Ok(self.loaded_resources.get(&key).unwrap());
-        }
-
-        if !full_path.exists() {
-            return Err(format!("Resource not found: {}", full_path.display()));
-        }
-
-        let resource = match full_path.extension().and_then(|s| s.to_str()) {
-            Some("json") => {
-                let content = fs::read_to_string(&full_path)
-                    .map_err(|e| format!("Failed to read JSON file {}: {}", full_path.display(), e))?;
-                let value: serde_json::Value = serde_json::from_str(&content)
-                    .map_err(|e| format!("Failed to parse JSON file {}: {}", full_path.display(), e))?;
-                Resource::Json(value)
-            },
-            Some("yaml") | Some("yml") => {
-                let content = fs::read_to_string(&full_path)
-                    .map_err(|e| format!("Failed to read YAML file {}: {}", full_path.display(), e))?;
-                let value: serde_yaml::Value = serde_yaml::from_str(&content)
-                    .map_err(|e| format!("Failed to parse YAML file {}: {}", full_path.display(), e))?;
-                Resource::Yaml(value)
-            },
-            Some("txt") | Some("md") | Some("log") | Some("sh") | Some("ps1") | Some("rs") | Some("py") | Some("js") => {
-                let content = fs::read_to_string(&full_path)
-                    .map_err(|e| format!("Failed to read text file {}: {}", full_path.display(), e))?;
-                Resource::Text(content)
-            },
-            _ => {
-                // Default to binary for unknown extensions
-                let content = fs::read(&full_path)
-                    .map_err(|e| format!("Failed to read binary file {}: {}", full_path.display(), e))?;
-                Resource::Binary(content)
-            },
-        };
-
-        self.loaded_resources.insert(key.clone(), resource);
-        Ok(self.loaded_resources.get(&key).unwrap())
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Resource manager initialized. Resource directory: {:?}", self.resource_dir);
+        fs::create_dir_all(&self.resource_dir).await?;
+        self.load_default_resources().await?;
+        Ok(())
     }
 
-    /// Retrieves a loaded resource by its relative path or ID.
-    pub fn get_resource(&self, key: &str) -> Option<&Resource> {
-        self.loaded_resources.get(key)
+    async fn load_default_resources(&self) -> Result<()> {
+        // Simulate loading some default resources
+        // In a real app, you'd scan the resource_dir or use embedded assets.
+        let mut resources = self.resources.clone(); // Clone to modify
+
+        let icon_path = self.resource_dir.join("default_icon.png");
+        if !icon_path.exists() {
+            // Simulate creating a dummy file
+            fs::write(&icon_path, b"// Dummy PNG content").await?;
+        }
+        resources.insert("default_icon".to_string(), Resource {
+            id: "default_icon".to_string(),
+            name: "Default App Icon".to_string(),
+            resource_type: ResourceType::Icon,
+            path: icon_path,
+            metadata: [("format".to_string(), "png".to_string())].iter().cloned().collect(),
+        });
+
+        log::info!("Loaded {} default resources.", resources.len());
+        Ok(())
     }
 
-    /// Lists all resources found in a given subdirectory relative to the base path.
-    pub fn list_resources_in_subdir(&self, subdir_path: &Path) -> Result<Vec<PathBuf>, String> {
-        let full_subdir_path = self.base_path.join(subdir_path);
-        if !full_subdir_path.exists() || !full_subdir_path.is_dir() {
-            return Err(format!("Subdirectory not found: {}", full_subdir_path.display()));
-        }
+    pub async fn get_resource(&self, id: &str) -> Option<Resource> {
+        self.resources.get(id).cloned()
+    }
 
-        let mut resource_paths = Vec::new();
-        for entry in fs::read_dir(&full_subdir_path)
-            .map_err(|e| format!("Failed to read directory {}: {}", full_subdir_path.display(), e))?
-        {
-            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let path = entry.path();
-            if path.is_file() {
-                resource_paths.push(path);
-            }
+    /// Loads the content of a resource as bytes.
+    pub async fn load_resource_bytes(&self, id: &str) -> Result<Vec<u8>> {
+        if let Some(resource) = self.resources.get(id) {
+            Ok(fs::read(&resource.path).await?)
+        } else {
+            Err(anyhow::anyhow!("Resource '{}' not found.", id))
         }
-        Ok(resource_paths)
+    }
+
+    /// Loads the content of a resource as a string (for text-based resources).
+    pub async fn load_resource_string(&self, id: &str) -> Result<String> {
+        if let Some(resource) = self.resources.get(id) {
+            Ok(fs::read_to_string(&resource.path).await?)
+        } else {
+            Err(anyhow::anyhow!("Resource '{}' not found.", id))
+        }
     }
 }
 
 pub fn init() {
-    println!("resources module loaded");
+    log::info!("Resources module initialized.");
 }

@@ -1,96 +1,92 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use crate::config::preferences::Preferences;
-use crate::config::theme::{Theme, ThemeConfig};
-use crate::config::yaml_theme_manager::YamlThemeManager;
-use crate::agent_mode_eval::ai_client::AiConfig;
-
-pub mod theme;
 pub mod preferences;
-pub mod storage;
+pub mod theme;
 pub mod yaml_theme;
 pub mod yaml_theme_manager;
 
-pub use theme::*;
-pub use preferences::*;
-pub use storage::*;
-pub use yaml_theme::*;
-pub use yaml_theme_manager::*;
+use anyhow::Result;
+use preferences::Preferences;
+use theme::Theme;
+use yaml_theme_manager::YamlThemeManager;
+use std::path::PathBuf;
+use directories::ProjectDirs;
+use once_cell::sync::Lazy;
+use tokio::sync::RwLock;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
-    pub preferences: Preferences,
-    pub theme: ThemeConfig,
-    pub ai: AiConfig,
-    pub environment_profiles: HashMap<String, HashMap<String, String>>, // New field
-    // Add other top-level configuration sections here
+pub static PROJECT_DIRS: Lazy<Option<ProjectDirs>> = Lazy::new(|| {
+    ProjectDirs::from("com", "NeoTerm", "NeoTerm")
+});
+
+pub static CONFIG_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    PROJECT_DIRS.as_ref()
+        .map(|dirs| dirs.config_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("./config")) // Fallback for systems without standard dirs
+});
+
+pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    PROJECT_DIRS.as_ref()
+        .map(|dirs| dirs.data_local_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("./data")) // Fallback
+});
+
+pub static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    PROJECT_DIRS.as_ref()
+        .map(|dirs| dirs.cache_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("./cache")) // Fallback
+});
+
+pub struct ConfigManager {
+    preferences: Arc<RwLock<Preferences>>,
+    theme_manager: Arc<YamlThemeManager>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            preferences: Preferences::default(),
-            theme: ThemeConfig::default(),
-            ai: AiConfig::default(),
-            environment_profiles: HashMap::new(),
-        }
-    }
-}
+impl ConfigManager {
+    pub async fn new() -> Result<Self> {
+        // Ensure config directories exist
+        tokio::fs::create_dir_all(&*CONFIG_DIR).await?;
+        tokio::fs::create_dir_all(&*DATA_DIR).await?;
+        tokio::fs::create_dir_all(&*CACHE_DIR).await?;
 
-impl Config {
-    pub fn load_from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
-        Ok(config)
+        let preferences = Arc::new(RwLock::new(Preferences::load().await?));
+        let theme_manager = Arc::new(YamlThemeManager::new());
+
+        Ok(Self {
+            preferences,
+            theme_manager,
+        })
     }
 
-    pub fn save_to_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let content = serde_yaml::to_string(self)?;
-        fs::write(path, content)?;
+    pub async fn init(&self) -> Result<()> {
+        log::info!("Config manager initialized.");
+        self.theme_manager.init().await?;
         Ok(())
     }
 
-    pub fn get_default_config_path() -> PathBuf {
-        // Example: ~/.config/neoterm/config.yaml or %APPDATA%/neoterm/config.yaml
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("neoterm")
-            .join("config.yaml")
+    pub async fn get_preferences(&self) -> Preferences {
+        self.preferences.read().await.clone()
     }
 
-    pub fn get_themes_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("neoterm")
-            .join("themes")
-    }
-
-    pub fn get_workflows_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("neoterm")
-            .join("workflows")
-    }
-
-    pub fn get_environment_profiles_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("neoterm")
-            .join("env_profiles")
-    }
-
-    pub fn ensure_config_dirs_exist() -> Result<(), Box<dyn std::error::Error>> {
-        let config_dir = Self::get_default_config_path().parent().unwrap().to_path_buf();
-        fs::create_dir_all(&config_dir)?;
-        fs::create_dir_all(Self::get_themes_dir())?;
-        fs::create_dir_all(Self::get_workflows_dir())?;
-        fs::create_dir_all(Self::get_environment_profiles_dir())?;
+    pub async fn update_preferences(&self, new_prefs: Preferences) -> Result<()> {
+        let mut prefs = self.preferences.write().await;
+        *prefs = new_prefs;
+        prefs.save().await?;
         Ok(())
+    }
+
+    pub async fn get_current_theme(&self) -> Result<Theme> {
+        let prefs = self.preferences.read().await;
+        self.theme_manager.get_theme(&prefs.theme_name).await
+    }
+
+    pub async fn get_theme_manager(&self) -> Arc<YamlThemeManager> {
+        self.theme_manager.clone()
     }
 }
 
 pub fn init() {
-    println!("config module loaded");
+    log::info!("Config module initialized.");
+    // Accessing lazy statics here to ensure they are initialized early
+    let _ = &*CONFIG_DIR;
+    let _ = &*DATA_DIR;
+    let _ = &*CACHE_DIR;
 }

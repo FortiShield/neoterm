@@ -1,114 +1,71 @@
-use async_graphql::{EmptySubscription, Schema};
-use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
-use async_graphql_warp::{GraphQLBadRequest, GraphQLResponse};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use warp::{http::Response as HttpResponse, Filter, Rejection};
+use anyhow::Result;
+use warp::{Filter, Rejection, Reply};
+use async_graphql::{EmptySubscription, Schema, Object, SimpleObject};
+use async_graphql_warp::{GraphQLResponse, GraphQLBadRequest};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-/// A simple GraphQL client for interacting with a GraphQL API.
-/// This module provides basic functionality to send GraphQL queries and mutations.
-pub struct GraphQLClient {
-    endpoint: String,
-    http_client: reqwest::Client,
-    headers: HashMap<String, String>,
+// Define your GraphQL schema types
+#[derive(SimpleObject)]
+pub struct User {
+    id: String,
+    name: String,
+    email: String,
 }
 
-impl GraphQLClient {
-    /// Creates a new `GraphQLClient` instance.
-    pub fn new(endpoint: String) -> Self {
-        Self {
-            endpoint,
-            http_client: reqwest::Client::new(),
-            headers: HashMap::new(),
-        }
-    }
-
-    /// Adds a header to all outgoing GraphQL requests.
-    pub fn add_header(&mut self, name: &str, value: &str) {
-        self.headers.insert(name.to_string(), value.to_string());
-    }
-
-    /// Sends a GraphQL query to the configured endpoint.
-    pub async fn query(&self, query: &str, variables: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
-        let mut request_body = serde_json::json!({
-            "query": query,
-        });
-        if let Some(vars) = variables {
-            request_body["variables"] = vars;
-        }
-
-        let mut request = self.http_client.post(&self.endpoint)
-            .json(&request_body);
-
-        for (key, value) in &self.headers {
-            request = request.header(key, value);
-        }
-
-        let response = request.send().await.map_err(|e| format!("Failed to send GraphQL request: {}", e))?;
-        let response_json: serde_json::Value = response.json().await.map_err(|e| format!("Failed to parse GraphQL response: {}", e))?;
-
-        if let Some(errors) = response_json.get("errors") {
-            Err(format!("GraphQL errors: {}", errors))
-        } else {
-            Ok(response_json["data"].clone())
-        }
-    }
-
-    /// Sends a GraphQL mutation to the configured endpoint.
-    pub async fn mutate(&self, mutation: &str, variables: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
-        // Mutations are handled similarly to queries, just with a different operation type.
-        self.query(mutation, variables).await
-    }
-}
-
-// --- Example GraphQL Server (for testing/demonstration purposes) ---
-
-// Define a simple GraphQL schema
 pub struct Query;
 
-#[async_graphql::Object]
+#[Object]
 impl Query {
     async fn hello(&self) -> String {
-        "Hello from NeoTerm GraphQL!".to_string()
+        "Hello, GraphQL!".to_string()
     }
 
-    async fn add_numbers(&self, a: i32, b: i32) -> i32 {
-        a + b
+    async fn users(&self) -> Vec<User> {
+        vec![
+            User { id: "1".to_string(), name: "Alice".to_string(), email: "alice@example.com".to_string() },
+            User { id: "2".to_string(), name: "Bob".to_string(), email: "bob@example.com".to_string() },
+        ]
     }
 }
 
 pub struct Mutation;
 
-#[async_graphql::Object]
+#[Object]
 impl Mutation {
-    async fn echo(&self, message: String) -> String {
-        format!("Echo: {}", message)
+    async fn add_user(&self, name: String, email: String) -> User {
+        // In a real app, you'd save this to a database
+        log::info!("Adding new user: {} ({})", name, email);
+        User {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            email,
+        }
     }
 }
 
 pub type AppSchema = Schema<Query, Mutation, EmptySubscription>;
 
-/// Creates a GraphQL server filter for Warp.
-pub fn create_graphql_server() -> impl Filter<Extract = (GraphQLResponse,), Error = Rejection> + Clone {
-    let schema = Schema::build(Query, Mutation, EmptySubscription).finish();
-
-    async_graphql_warp::graphql(schema).and_then(
-        |(schema, request): (AppSchema, async_graphql::Request)| async move {
-            Ok::<_, Rejection>(async_graphql_warp::Response::from(schema.execute(request).await))
-        },
-    )
+pub fn build_schema() -> AppSchema {
+    Schema::build(Query, Mutation, EmptySubscription).finish()
 }
 
-/// Creates a GraphQL Playground filter for Warp.
-pub fn create_graphql_playground() -> impl Filter<Extract = (HttpResponse<String>,), Error = Rejection> + Clone {
-    warp::path("playground").map(|| {
-        HttpResponse::builder()
-            .header("content-type", "text/html")
-            .body(playground_source(GraphQLPlaygroundConfig::new("/graphql")))
-            .unwrap()
-    })
+pub async fn run_graphql_server() {
+    let schema = build_schema();
+
+    let graphql_post = async_graphql_warp::graphql(schema)
+        .and_then(|(schema, request): (AppSchema, async_graphql::Request)| async move {
+            Ok::<_, Rejection>(GraphQLResponse::from(schema.execute(request).await))
+        });
+
+    let routes = warp::path("graphql")
+        .and(warp::post().and(graphql_post))
+        .or(warp::path("graphql").and(warp::get()).and(graphql_post)); // Allow GET for GraphiQL
+
+    log::info!("Starting GraphQL server on 127.0.0.1:8000/graphql");
+    warp::serve(routes).run(([127, 0, 0, 1], 8000)).await;
 }
 
 pub fn init() {
-    println!("graphql module initialized: Provides GraphQL client and server capabilities.");
+    log::info!("GraphQL module initialized.");
 }

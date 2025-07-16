@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+use anyhow::Result;
+use log::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plugin {
@@ -158,5 +160,5 @@ impl PluginManager {
 }
 
 pub fn init() {
-    println!("plugins module loaded");
+    info!("Plugins module initialized.");
 }

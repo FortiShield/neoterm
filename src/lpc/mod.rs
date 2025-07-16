@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 /// Represents a simplified AST (Abstract Syntax Tree) node for an LPC-like language.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LpcAstNode {
     Program(Vec<LpcAstNode>),
     FunctionDef {
@@ -25,6 +28,23 @@ pub enum LpcAstNode {
     Identifier(String),
     Return(Option<Box<LpcAstNode>>),
     // ... other language constructs
+}
+
+/// Represents an event in the LPC system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LpcEvent {
+    ScriptLoaded { name: String },
+    ScriptExecuted { name: String, result: String },
+    ScriptError { name: String, error: String },
+    // Add more events for debugging, compilation, etc.
+}
+
+/// Represents an LPC script.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LpcScript {
+    pub name: String,
+    pub code: String,
+    pub metadata: HashMap<String, String>,
 }
 
 /// A basic parser for a simplified LPC-like language.
@@ -120,8 +140,54 @@ impl LpcProcessor {
     }
 }
 
+/// The LPC engine responsible for managing scripts and events.
+pub struct LpcEngine {
+    event_sender: mpsc::Sender<LpcEvent>,
+    // Add internal state for compiled scripts, runtime environment, etc.
+}
+
+impl LpcEngine {
+    pub fn new(event_sender: mpsc::Sender<LpcEvent>) -> Self {
+        Self { event_sender }
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        log::info!("LPC engine initialized.");
+        // Load any built-in LPC scripts or runtime setup
+        Ok(())
+    }
+
+    /// Loads and compiles an LPC script.
+    pub async fn load_script(&self, script: LpcScript) -> Result<()> {
+        log::info!("Loading LPC script: {}", script.name);
+        // Simulate compilation/parsing
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        self.event_sender.send(LpcEvent::ScriptLoaded { name: script.name }).await?;
+        Ok(())
+    }
+
+    /// Executes a loaded LPC script.
+    pub async fn execute_script(&self, script_name: &str, args: HashMap<String, String>) -> Result<()> {
+        log::info!("Executing LPC script: {} with args: {:?}", script_name, args);
+        // Simulate execution
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let result = format!("Simulated result from {} with args {:?}", script_name, args);
+        self.event_sender.send(LpcEvent::ScriptExecuted {
+            name: script_name.to_string(),
+            result,
+        }).await?;
+        Ok(())
+    }
+
+    /// Provides an API for LPC scripts to interact with NeoTerm's core.
+    pub async fn provide_api(&self) {
+        log::debug!("LPC engine providing API to scripts.");
+        // This would expose functions like `term.print()`, `fs.read()`, `ui.notify()` etc.
+    }
+}
+
 pub fn init() {
-    println!("lpc module initialized: Provides basic LPC language processing capabilities.");
+    log::info!("LPC module initialized.");
 }
 
 #[cfg(test)]
