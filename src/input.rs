@@ -2,7 +2,7 @@ use iced::{Element, widget::{text_input, column, row, container, button, text}};
 use iced::keyboard::{self, KeyCode, Modifiers};
 use iced::{keyboard::Event as KeyEvent, Event as IcedEvent};
 use std::collections::{VecDeque, HashMap};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event as CrosstermEvent, KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers}; // Renamed KeyCode and KeyEvent to avoid conflict
 use tokio::sync::mpsc;
 use anyhow::Result;
 
@@ -13,7 +13,7 @@ pub struct EnhancedTextInput {
     active_suggestion: Option<usize>,
     history: VecDeque<String>,
     history_index: Option<usize>,
-    // syntax_tree: Option<SyntaxTree>, // Not used in this phase, keep for future
+    live_preview: String, // New field for live preview
 }
 
 #[derive(Debug, Clone)]
@@ -34,42 +34,6 @@ pub enum SuggestionType {
     Alias,
 }
 
-// Not used in this phase, keep for future
-// #[derive(Debug, Clone)]
-// pub struct SyntaxTree {
-//     tokens: Vec<Token>,
-//     errors: Vec<SyntaxError>,
-// }
-
-// #[derive(Debug, Clone)]
-// pub struct Token {
-//     text: String,
-//     token_type: TokenType,
-//     start: usize,
-//     end: usize,
-// }
-
-// #[derive(Debug, Clone)]
-// pub enum TokenType {
-//     Command,
-//     Argument,
-//     Flag,
-//     String,
-//     Number,
-//     Operator,
-//     Pipe,
-//     Redirect,
-//     Variable,
-//     Comment,
-// }
-
-// #[derive(Debug, Clone)]
-// pub struct SyntaxError {
-//     message: String,
-//     position: usize,
-//     length: usize,
-// }
-
 #[derive(Debug, Clone)]
 pub enum Message {
     InputChanged(String),
@@ -81,7 +45,7 @@ pub enum Message {
     CommandPaletteToggle,
     AISidebarToggle,
     RunBenchmark,
-    KeyInput(KeyEvent),
+    KeyInput(CrosstermKeyEvent), // Use CrosstermKeyEvent
     Resize(u16, u16),
     MouseInput(event::MouseEvent),
     Error(String),
@@ -174,7 +138,7 @@ impl EnhancedTextInput {
             active_suggestion: None,
             history: VecDeque::new(),
             history_index: None,
-            // syntax_tree: None,
+            live_preview: String::new(), // Initialize new field
         }
     }
 
@@ -182,22 +146,24 @@ impl EnhancedTextInput {
         match message {
             Message::InputChanged(value) => {
                 self.value = value;
-                // self.update_syntax_tree(); // Not used in this phase
                 self.update_suggestions();
-                self.active_suggestion = None; // Reset active suggestion on input change
+                // Auto-select the first suggestion and update live preview
+                self.active_suggestion = self.suggestions.first().map(|_| 0);
+                self.update_live_preview();
             }
             Message::Submit => {
-                // Handled by parent, but we can clear input here
                 self.add_to_history(self.value.clone());
                 self.value.clear();
                 self.suggestions.clear();
                 self.active_suggestion = None;
+                self.live_preview.clear(); // Clear live preview on submit
             }
             Message::SuggestionSelected(index) => {
                 if let Some(suggestion) = self.suggestions.get(index) {
                     self.value = suggestion.text.clone();
                     self.suggestions.clear(); // Clear suggestions after selection
                     self.active_suggestion = None;
+                    self.live_preview.clear(); // Clear live preview after selection
                 }
             }
             Message::NavigateSuggestions(direction) => {
@@ -215,6 +181,7 @@ impl EnhancedTextInput {
                     },
                 };
                 self.active_suggestion = Some(new_index);
+                self.update_live_preview(); // Update live preview when navigating
             }
             Message::ApplySuggestion => {
                 if let Some(index) = self.active_suggestion {
@@ -222,6 +189,7 @@ impl EnhancedTextInput {
                         self.value = suggestion.text.clone();
                         self.suggestions.clear();
                         self.active_suggestion = None;
+                        self.live_preview.clear(); // Clear live preview after applying
                     }
                 }
             }
@@ -230,29 +198,16 @@ impl EnhancedTextInput {
                     self.value = cmd;
                     self.suggestions.clear(); // Clear suggestions when navigating history
                     self.active_suggestion = None;
+                    self.live_preview.clear(); // Clear live preview when navigating history
                 }
             }
-            Message::CommandPaletteToggle => {
-                // Handle command palette toggle
-            }
-            Message::AISidebarToggle => {
-                // Handle AI sidebar toggle
-            }
-            Message::RunBenchmark => {
-                // Handle run benchmark
-            }
-            Message::KeyInput(key_event) => {
-                // Handle key input event
-            }
-            Message::Resize(width, height) => {
-                // Handle resize event
-            }
-            Message::MouseInput(mouse_event) => {
-                // Handle mouse input event
-            }
-            Message::Error(error_message) => {
-                // Handle error event
-            }
+            Message::CommandPaletteToggle => { /* Handled by parent */ }
+            Message::AISidebarToggle => { /* Handled by parent */ }
+            Message::RunBenchmark => { /* Handled by parent */ }
+            Message::KeyInput(_) => { /* Handled by parent */ }
+            Message::Resize(_, _) => { /* Handled by parent */ }
+            Message::MouseInput(_) => { /* Handled by parent */ }
+            Message::Error(_) => { /* Handled by parent */ }
         }
     }
 
@@ -302,61 +257,24 @@ impl EnhancedTextInput {
         }
     }
 
-    // fn update_syntax_tree(&mut self) {
-    //     self.syntax_tree = Some(self.parse_command(&self.value));
-    // }
-
-    // fn parse_command(&self, input: &str) -> SyntaxTree {
-    //     // Simple tokenizer - in a real implementation, you'd use a proper parser
-    //     let mut tokens = Vec::new();
-    //     let mut errors = Vec::new();
-    //     let mut current_pos = 0;
-
-    //     let words: Vec<&str> = input.split_whitespace().collect();
-        
-    //     for (i, word) in words.iter().enumerate() {
-    //         let token_type = if i == 0 {
-    //             TokenType::Command
-    //         } else if word.starts_with('-') {
-    //             TokenType::Flag
-    //         } else if word.starts_with('$') {
-    //             TokenType::Variable
-    //         } else if word.contains('|') {
-    //             TokenType::Pipe
-    //         } else if word.contains('>') || word.contains('<') {
-    //             TokenType::Redirect
-    //         } else if word.starts_with('"') || word.starts_with('\'') {
-    //             TokenType::String
-    //         } else if word.parse::<f64>().is_ok() {
-    //             TokenType::Number
-    //         } else {
-    //             TokenType::Argument
-    //         };
-
-    //         tokens.push(Token {
-    //             text: word.to_string(),
-    //             token_type,
-    //             start: current_pos,
-    //             end: current_pos + word.len(),
-    //         });
-
-    //         current_pos += word.len() + 1; // +1 for space
-    //     }
-
-    //     SyntaxTree { tokens, errors }
-    // }
-
     fn update_suggestions(&mut self) {
         let mut suggestions = Vec::new();
-        
-        if let Some(last_word) = self.value.split_whitespace().last() {
+        let current_input = self.value.trim();
+
+        if current_input.is_empty() {
+            // Suggest common commands if input is empty
+            suggestions.extend(self.get_command_suggestions(""));
+        } else {
+            // Get the last word for more targeted suggestions
+            let last_word = current_input.split_whitespace().last().unwrap_or("");
+
             // Command suggestions (only if it's the first word or empty)
-            if self.value.split_whitespace().count() <= 1 {
+            if current_input.split_whitespace().count() <= 1 {
                 suggestions.extend(self.get_command_suggestions(last_word));
             }
             
             // History suggestions (always relevant)
-            suggestions.extend(self.get_history_suggestions(last_word));
+            suggestions.extend(self.get_history_suggestions(current_input));
 
             // File/directory suggestions (placeholder for now)
             // In a real implementation, you'd scan the filesystem based on the current path
@@ -368,6 +286,14 @@ impl EnhancedTextInput {
         suggestions.truncate(10); // Limit to top 10 suggestions
 
         self.suggestions = suggestions;
+    }
+
+    fn update_live_preview(&mut self) {
+        self.live_preview = if let Some(index) = self.active_suggestion {
+            self.suggestions.get(index).map(|s| s.text.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
     }
 
     fn get_command_suggestions(&self, prefix: &str) -> Vec<Suggestion> {
@@ -431,19 +357,24 @@ impl EnhancedTextInput {
         if query.is_empty() {
             return 0.0;
         }
-        if text.starts_with(query) {
+        let text_lower = text.to_lowercase();
+        let query_lower = query.to_lowercase();
+
+        if text_lower.starts_with(&query_lower) {
             1.0 // Exact prefix match is highest score
-        } else if text.contains(query) {
+        } else if text_lower.contains(&query_lower) {
             0.7 // Contains query
         } else {
-            // Simple subsequence matching
+            // Simple subsequence matching with position bonus
             let mut score = 0.0;
-            let mut query_chars = query.chars().peekable();
+            let mut query_chars = query_lower.chars().peekable();
             
-            for ch in text.chars() {
+            for (i, ch) in text_lower.chars().enumerate() {
                 if let Some(&query_ch) = query_chars.peek() {
-                    if ch.to_lowercase().eq(query_ch.to_lowercase()) {
+                    if ch == query_ch {
                         score += 0.1;
+                        // Add bonus for earlier matches
+                        if i < 5 { score += 0.05; }
                         query_chars.next();
                     }
                 }
@@ -454,7 +385,19 @@ impl EnhancedTextInput {
     }
 
     pub fn view(&self, prompt_indicator: &str, placeholder: &str) -> Element<Message> {
-        let input = text_input(placeholder, &self.value)
+        let current_placeholder = if !self.live_preview.is_empty() && self.value.is_empty() {
+            &self.live_preview // Show live preview as placeholder if input is empty
+        } else if !self.live_preview.is_empty() && self.live_preview.starts_with(&self.value) {
+            // If there's a live preview and it starts with the current value,
+            // show the completion part as placeholder.
+            // This is a simple way to simulate ghost text.
+            &self.live_preview[self.value.len()..]
+        }
+        else {
+            placeholder
+        };
+
+        let input = text_input(current_placeholder, &self.value)
             .on_input(Message::InputChanged)
             .on_submit(Message::Submit)
             .padding(12)
@@ -531,7 +474,7 @@ pub fn init() {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     /// A keyboard key was pressed.
-    Key(KeyEvent),
+    Key(CrosstermKeyEvent),
     /// The terminal was resized.
     Resize(u16, u16),
     /// A mouse event occurred.
@@ -572,19 +515,19 @@ impl InputManager {
                 // Poll for events with a timeout to allow other async tasks to run
                 if event::poll(std::time::Duration::from_millis(50)).unwrap() {
                     match event::read() {
-                        Ok(Event::Key(key_event)) => {
+                        Ok(CrosstermEvent::Key(key_event)) => {
                             if sender.send(InputEvent::Key(key_event)).await.is_err() {
                                 log::warn!("Input event receiver dropped, stopping event loop.");
                                 break;
                             }
                         },
-                        Ok(Event::Resize(w, h)) => {
+                        Ok(CrosstermEvent::Resize(w, h)) => {
                             if sender.send(InputEvent::Resize(w, h)).await.is_err() {
                                 log::warn!("Input event receiver dropped, stopping event loop.");
                                 break;
                             }
                         },
-                        Ok(Event::Mouse(mouse_event)) => {
+                        Ok(CrosstermEvent::Mouse(mouse_event)) => {
                             if sender.send(InputEvent::Mouse(mouse_event)).await.is_err() {
                                 log::warn!("Input event receiver dropped, stopping event loop.");
                                 break;
